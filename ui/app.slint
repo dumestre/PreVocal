@@ -198,6 +198,7 @@ export component PreVocalUI inherits Window {
     in-out property <float> output-trim: 0.0;
     in-out property <bool> phase-flip: false;
     in-out property <float> input-level: 0.0;
+    in-out property <float> output-level: 0.0;
 
     callback drive-changed(float);
     callback hpf-changed(float);
@@ -219,27 +220,7 @@ export component PreVocalUI inherits Window {
             alignment: LayoutAlignment.start;
             cross-axis-alignment: center;
 
-            // Input level meter (RMS)
-            VerticalLayout {
-                spacing: 8px;
-                alignment: center;
-                width: 36px;
-                Rectangle {
-                    width: 12px;
-                    height: 140px;
-                    border-radius: 6px;
-                    background: #2a2a30;
-                    Rectangle {
-                        width: 12px;
-                        height: clamp(root.input-level * 140.0, 0.0, 140.0) * 1px;
-                        x: 0px;
-                        y: parent.height - self.height;
-                        background: #9D4EDD;
-                        border-radius: 6px;
-                    }
-                }
-                Text { text: "IN"; font-size: 11px; color: #A0A0B0; }
-            }
+            
 
            
 
@@ -289,6 +270,28 @@ export component PreVocalUI inherits Window {
                 padding: 24px;
                 spacing: 20px;
                 height: 100%;
+
+                // Input meter (left)
+                VerticalLayout {
+                    spacing: 8px;
+                    alignment: center;
+                    width: 36px;
+                    Rectangle {
+                        width: 12px;
+                        height: 140px;
+                        border-radius: 6px;
+                        background: #2a2a30;
+                        Rectangle {
+                            width: 12px;
+                            height: clamp(root.input-level * 140.0, 0.0, 140.0) * 1px;
+                            x: 0px;
+                            y: parent.height - self.height;
+                            background: #9D4EDD;
+                            border-radius: 6px;
+                        }
+                    }
+                    Text { text: "IN"; font-size: 11px; color: #A0A0B0; }
+                }
 
                 VerticalLayout {
                     spacing: 16px;
@@ -360,6 +363,28 @@ export component PreVocalUI inherits Window {
                         toggled(v) => { root.phase-flip-changed(v); }
                     }
                     Text { text: "PHASE FLIP"; font-size: 13px; color: #A0A0B0; }
+                }
+
+                // Output meter (right)
+                VerticalLayout {
+                    spacing: 8px;
+                    alignment: center;
+                    width: 36px;
+                    Rectangle {
+                        width: 12px;
+                        height: 140px;
+                        border-radius: 6px;
+                        background: #2a2a30;
+                        Rectangle {
+                            width: 12px;
+                            height: clamp(root.output-level * 140.0, 0.0, 140.0) * 1px;
+                            x: 0px;
+                            y: parent.height - self.height;
+                            background: #C77DFF;
+                            border-radius: 6px;
+                        }
+                    }
+                    Text { text: "OUT"; font-size: 11px; color: #A0A0B0; }
                 }
             }
         }
