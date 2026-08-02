@@ -68,6 +68,9 @@ component ControlKnob inherits Rectangle {
     in-out property <float> value: 0.0;
     in property <float> minimum: 0.0;
     in property <float> maximum: 1.0;
+    property <length> drag-start-y: 0px;
+    property <float> drag-start-value: 0.0;
+    property <bool> dragging: false;
     callback changed(float);
 
     width: 120px;
@@ -115,9 +118,20 @@ component ControlKnob inherits Rectangle {
         width: parent.width;
         height: parent.height;
         pointer-event(e) => {
-            if (e.kind == PointerEventKind.move && self.pressed) {
-                root.value = clamp(root.minimum + (1.0 - self.mouse-y / parent.height) * (root.maximum - root.minimum), root.minimum, root.maximum);
+            if (e.kind == PointerEventKind.down) {
+                root.dragging = true;
+                root.drag-start-y = self.mouse-y;
+                root.drag-start-value = root.value;
+                return true;
+            } else if (e.kind == PointerEventKind.move && root.dragging) {
+                let dy = self.mouse-y - root.drag-start-y;
+                let range = root.maximum - root.minimum;
+                root.value = clamp(root.drag-start-value - (dy / parent.height) * range, root.minimum, root.maximum);
                 root.changed(root.value);
+                return true;
+            } else if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
+                root.dragging = false;
+                return true;
             }
         }
     }
@@ -220,7 +234,7 @@ export component PreVocalUI inherits Window {
                 
             }
             Text {
-                text: "Vocal Bus Preamp";
+                text: "By Du Mestre";
                 font-size: 16px;
                 color: #A0A0B0;
                 vertical-alignment: center;
