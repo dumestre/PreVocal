@@ -220,6 +220,7 @@ mod standalone {
         engine: Arc<Mutex<AudioEngine>>,
         shared_out: Arc<Mutex<FrameRing>>,
         active: Arc<AtomicBool>,
+        shared_level: Arc<Mutex<f32>>,
     ) -> Result<(), cpal::Error>
     where
         T: cpal::SizedSample + FromSample<f32>,
@@ -264,6 +265,7 @@ mod standalone {
         let input_engine = engine.clone();
         let input_shared = shared_out.clone();
         let input_active = active.clone();
+        let input_level = shared_level.clone();
 
         let input_stream = input_device.build_input_stream::<T, _, _>(
             input_config,
@@ -276,6 +278,15 @@ mod standalone {
                 let mut processed = vec![0.0f32; interleaved.len()];
                 engine.process_block(&interleaved, &mut processed);
                 drop(engine);
+                // compute RMS across processed samples
+                let mut sum_sq = 0.0f32;
+                for &s in processed.iter() {
+                    sum_sq += s * s;
+                }
+                let rms = if processed.is_empty() { 0.0 } else { (sum_sq / processed.len() as f32).sqrt() };
+                if let Ok(mut lvl) = input_level.lock() {
+                    *lvl = rms.clamp(0.0, 1.0);
+                }
                 input_shared.lock().unwrap().write(&processed);
             },
             |err| tracing::error!("Input stream error: {err}"),
@@ -311,7 +322,7 @@ mod standalone {
 
     fn run_audio(
         params: Arc<PreVocalParams>,
-    ) -> Result<(Arc<AtomicBool>, Arc<Mutex<FrameRing>>, Arc<Mutex<AudioEngine>>), String> {
+    ) -> Result<(Arc<AtomicBool>, Arc<Mutex<FrameRing>>, Arc<Mutex<AudioEngine>>, Arc<Mutex<f32>>), String> {
         let host = cpal::default_host();
         let output_device = host
             .default_output_device()
@@ -330,20 +341,21 @@ mod standalone {
         )));
         let shared_out = Arc::new(Mutex::new(FrameRing::new(8192, num_channels)));
         let active = Arc::new(AtomicBool::new(true));
+        let shared_level = Arc::new(Mutex::new(0.0f32));
 
         let dispatch = move |engine: Arc<Mutex<AudioEngine>>,
                              shared_out: Arc<Mutex<FrameRing>>,
                              active: Arc<AtomicBool>|
               -> Result<(), cpal::Error> {
             match output_config.sample_format() {
-                cpal::SampleFormat::F32 => run_stream::<f32>(engine, shared_out, active),
-                cpal::SampleFormat::F64 => run_stream::<f64>(engine, shared_out, active),
-                cpal::SampleFormat::I16 => run_stream::<i16>(engine, shared_out, active),
-                cpal::SampleFormat::U16 => run_stream::<u16>(engine, shared_out, active),
-                cpal::SampleFormat::I32 => run_stream::<i32>(engine, shared_out, active),
-                cpal::SampleFormat::U32 => run_stream::<u32>(engine, shared_out, active),
-                cpal::SampleFormat::I8 => run_stream::<i8>(engine, shared_out, active),
-                cpal::SampleFormat::U8 => run_stream::<u8>(engine, shared_out, active),
+                cpal::SampleFormat::F32 => run_stream::<f32>(engine, shared_out, active, shared_level.clone()),
+                cpal::SampleFormat::F64 => run_stream::<f64>(engine, shared_out, active, shared_level.clone()),
+                cpal::SampleFormat::I16 => run_stream::<i16>(engine, shared_out, active, shared_level.clone()),
+                cpal::SampleFormat::U16 => run_stream::<u16>(engine, shared_out, active, shared_level.clone()),
+                cpal::SampleFormat::I32 => run_stream::<i32>(engine, shared_out, active, shared_level.clone()),
+                cpal::SampleFormat::U32 => run_stream::<u32>(engine, shared_out, active, shared_level.clone()),
+                cpal::SampleFormat::I8 => run_stream::<i8>(engine, shared_out, active, shared_level.clone()),
+                cpal::SampleFormat::U8 => run_stream::<u8>(engine, shared_out, active, shared_level.clone()),
                 other => {
                     return Err(cpal::Error::with_message(
                         cpal::ErrorKind::UnsupportedConfig,
@@ -354,7 +366,7 @@ mod standalone {
         };
 
         match dispatch(engine.clone(), shared_out.clone(), active.clone()) {
-            Ok(()) => Ok((active, shared_out, engine)),
+            Ok(()) => Ok((active, shared_out, engine, shared_level)),
             Err(e) => Err(format!("Could not build audio streams: {e}")),
         }
     }
@@ -368,6 +380,7 @@ mod standalone {
         engine: Arc<Mutex<AudioEngine>>,
         shared_out: Arc<Mutex<FrameRing>>,
         active: Arc<AtomicBool>,
+        shared_level: Arc<Mutex<f32>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let ui = PreVocalUI::new()?;
 
@@ -393,6 +406,21 @@ mod standalone {
         ui.on_phase_flip_changed(move |v| bridge_phase.write_phase(v));
 
         let _ = (engine, shared_out, active);
+
+        // spawn a thread to poll shared_level and update the UI meter
+        let ui_weak = ui.as_weak();
+        let level_poll = Arc::clone(&shared_level);
+        let active_poll = active.clone();
+        std::thread::spawn(move || {
+            use std::time::Duration;
+            while active_poll.load(Ordering::Relaxed) {
+                let lvl = *level_poll.lock().unwrap();
+                // update UI meter; Slint weak handle will ignore if UI closed
+                ui_weak.set_input_level(lvl);
+                std::thread::sleep(Duration::from_millis(60));
+            }
+        });
+
         ui.run()?;
         Ok(())
     }
@@ -402,8 +430,8 @@ mod standalone {
         let bridge = UiBridge::new(&params);
 
         match run_audio(params) {
-            Ok((active, shared_out, engine)) => {
-                if let Err(e) = run_gui(bridge.into(), engine, shared_out, active) {
+            Ok((active, shared_out, engine, shared_level)) => {
+                if let Err(e) = run_gui(bridge.into(), engine, shared_out, active, shared_level) {
                     eprintln!("GUI error: {e}");
                 }
             }
