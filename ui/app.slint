@@ -1,6 +1,8 @@
 // PreVocal — Vocal Bus Preamp
 // Dark Studio Pro / Anodized Metal theme with Neon Purple accents.
 
+import { ComboBox } from "std-widgets.slint";
+
 component VerticalFader inherits Rectangle {
     in-out property <float> value: 0.0;
     in property <float> minimum: 0.0;
@@ -186,6 +188,67 @@ component PhaseToggle inherits Rectangle {
     }
 }
 
+component LevelMeter inherits Rectangle {
+    in-out property <float> level: 0.0;
+    in-out property <float> peak: 0.0;
+
+    width: 14px;
+    height: 150px;
+
+    // Green below -6 dB, yellow -6..-3 dB, red above -3 dB (clip zone).
+    // The level is a 0..1 mapping of the dBFS scale (see level_to_meter in main.rs).
+    function colorFor() -> color {
+        return root.level < 0.9 ? #4CAF50 : (root.level < 0.95 ? #FFEB3B : #EF5350);
+    }
+    function fillHeight() -> length {
+        return clamp(root.level, 0.0, 1.0) * root.height;
+    }
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: 7px;
+        background: #2a2a30;
+        clip: true;
+
+        // Zone guides: green (0..-6 dB), yellow (-6..-3 dB), red (-3..0 dB)
+        Rectangle {
+            width: parent.width;
+            height: parent.height * 0.9;
+            y: parent.height * 0.1;
+            background: rgba(76, 175, 80, 0.18);
+        }
+        Rectangle {
+            width: parent.width;
+            height: parent.height * 0.05;
+            y: parent.height * 0.05;
+            background: rgba(255, 235, 59, 0.24);
+        }
+        Rectangle {
+            width: parent.width;
+            height: parent.height * 0.05;
+            y: 0px;
+            background: rgba(239, 83, 80, 0.34);
+        }
+
+        // Level fill, colored by the current zone
+        Rectangle {
+            width: parent.width;
+            height: root.fillHeight();
+            y: parent.height - self.height;
+            background: root.colorFor();
+        }
+
+        // Peak hold marker
+        Rectangle {
+            width: parent.width;
+            height: 2px;
+            y: parent.height - clamp(root.peak, 0.0, 1.0) * parent.height;
+            background: root.peak >= 0.95 ? #EF5350 : #E0E0E0;
+        }
+    }
+}
+
 export component PreVocalUI inherits Window {
     preferred-width: 1000px;
     preferred-height: 640px;
@@ -199,12 +262,22 @@ export component PreVocalUI inherits Window {
     in-out property <bool> phase-flip: false;
     in-out property <float> input-level: 0.0;
     in-out property <float> output-level: 0.0;
+    in-out property <float> input-peak: 0.0;
+    in-out property <float> output-peak: 0.0;
+    in-out property <[string]> available-devices: [];
+    in-out property <int> device-index: -1;
+    in-out property <string> driver-name: "";
+    in-out property <string> audio-status: "";
+    in-out property <bool> audio-running: false;
 
     callback drive-changed(float);
     callback hpf-changed(float);
     callback air-changed(float);
     callback output-trim-changed(float);
     callback phase-flip-changed(bool);
+    callback device-selected(string);
+    callback restart-clicked();
+    callback refresh-clicked();
 
     VerticalLayout {
         padding: 26px;
@@ -263,6 +336,103 @@ export component PreVocalUI inherits Window {
     
     
 
+        // Audio device / driver selector
+        Rectangle {
+            border-radius: 14px;
+            background: #1E1E24;
+            border-width: 1px;
+            border-color: rgba(157, 78, 221, 0.14);
+
+            HorizontalLayout {
+                padding-left: 18px;
+                padding-right: 18px;
+                padding-top: 10px;
+                padding-bottom: 10px;
+                spacing: 12px;
+                alignment: LayoutAlignment.start;
+                cross-axis-alignment: center;
+
+                Text {
+                    text: "AUDIO";
+                    font-size: 12px;
+                    color: #A0A0B0;
+                    vertical-alignment: center;
+                }
+                ComboBox {
+                    min-width: 320px;
+                    model: root.available-devices;
+                    current-index: root.device-index;
+                    selected(v) => {
+                        root.device-selected(v);
+                    }
+                }
+                Text {
+                    text: root.driver-name;
+                    font-size: 12px;
+                    color: #C77DFF;
+                    vertical-alignment: center;
+                }
+                Rectangle {
+                    width: 1px;
+                    height: 26px;
+                    background: #3C096C;
+                }
+                Text {
+                    text: root.audio-status;
+                    font-size: 12px;
+                    color: root.audio-running ? #4CAF50 : (root.audio-status == "" ? #A0A0B0 : #EF5350);
+                    vertical-alignment: center;
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: transparent;
+                }
+                // Refresh device list
+                Rectangle {
+                    width: 30px;
+                    height: 30px;
+                    border-radius: 15px;
+                    background: ta_refresh.pressed ? #3C096C : #121214;
+                    border-width: 1px;
+                    border-color: #3C096C;
+                    Text {
+                        text: "↻";
+                        font-size: 16px;
+                        color: #C77DFF;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    ta_refresh := TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        clicked => { root.refresh-clicked(); }
+                    }
+                }
+                // Restart audio engine (applies selected device)
+                Rectangle {
+                    width: 90px;
+                    height: 30px;
+                    border-radius: 15px;
+                    background: ta_restart.pressed ? #3C096C : #121214;
+                    border-width: 1px;
+                    border-color: #9D4EDD;
+                    Text {
+                        text: "RESTART";
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: #C77DFF;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    ta_restart := TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        clicked => { root.restart-clicked(); }
+                    }
+                }
+            }
+        }
+
         // Main control panel
         Rectangle {
             border-radius: 22px;
@@ -282,19 +452,9 @@ export component PreVocalUI inherits Window {
                     spacing: 8px;
                     alignment: center;
                     width: 36px;
-                    Rectangle {
-                        width: 12px;
-                        height: 140px;
-                        border-radius: 6px;
-                        background: #2a2a30;
-                        Rectangle {
-                            width: 12px;
-                            height: clamp(root.input-level * 140.0, 0.0, 140.0) * 1px;
-                            x: 0px;
-                            y: parent.height - self.height;
-                            background: #9D4EDD;
-                            border-radius: 6px;
-                        }
+                    LevelMeter {
+                        level: root.input-level;
+                        peak: root.input-peak;
                     }
                     Text { text: "IN"; font-size: 11px; color: #A0A0B0; }
                 }
@@ -376,19 +536,9 @@ export component PreVocalUI inherits Window {
                     spacing: 8px;
                     alignment: center;
                     width: 36px;
-                    Rectangle {
-                        width: 12px;
-                        height: 140px;
-                        border-radius: 6px;
-                        background: #2a2a30;
-                        Rectangle {
-                            width: 12px;
-                            height: clamp(root.output-level * 140.0, 0.0, 140.0) * 1px;
-                            x: 0px;
-                            y: parent.height - self.height;
-                            background: #C77DFF;
-                            border-radius: 6px;
-                        }
+                    LevelMeter {
+                        level: root.output-level;
+                        peak: root.output-peak;
                     }
                     Text { text: "OUT"; font-size: 11px; color: #A0A0B0; }
                 }

@@ -19,6 +19,9 @@ path = "src/main.rs"
 [features]
 default = ["nice-plug/vst3", "nice-plug/tracing-subscriber"]
 standalone = ["nice-plug/standalone", "nice-plug/vst3", "nice-plug/tracing-subscriber", "dep:cpal"]
+# Windows-only: enables the ASIO host (ASIO4ALL, Steinberg ASIO, etc.) in the
+# standalone. Requires LLVM/Clang + MSVC build tools to compile the ASIO SDK.
+asio = ["dep:cpal", "cpal/asio"]
 
 [dependencies]
 nice-plug = { git = "https://codeberg.org/RustAudio/nice-plug", tag = "v0.2.3", default-features = false }

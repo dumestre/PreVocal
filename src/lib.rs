@@ -312,6 +312,16 @@ pub struct PreVocalDsp {
     filter_states: Vec<ChannelFilter>,
 }
 
+/// One set of smoothed parameter values shared by a whole block of audio.
+#[derive(Clone, Copy)]
+struct BlockParams {
+    drive: f32,
+    hpf_freq: f32,
+    air_db: f32,
+    phase_invert: bool,
+    trim: f32,
+}
+
 impl PreVocalDsp {
     pub fn new(params: Arc<PreVocalParams>) -> Self {
         Self {
@@ -339,23 +349,37 @@ impl PreVocalDsp {
         self.filter_states.resize(num_channels, ChannelFilter::default());
     }
 
+    /// Advance the smoothers by a whole block and return the parameter values to use.
+    /// Returns `None` for an empty block.
+    fn block_params(&self, num_frames: usize) -> Option<BlockParams> {
+        if num_frames == 0 {
+            return None;
+        }
+        let steps = num_frames as u32;
+        Some(BlockParams {
+            drive: self.params.drive.smoothed.next_step(steps),
+            hpf_freq: self.params.hpf.smoothed.next_step(steps),
+            air_db: self.params.air.smoothed.next_step(steps),
+            phase_invert: self.params.phase_flip.modulated_plain_value(),
+            trim: self.params.output_trim.smoothed.next_step(steps),
+        })
+    }
+
+    fn coeffs_for(&self, p: &BlockParams) -> (BiquadCoeffs, BiquadCoeffs) {
+        (
+            butterworth_2p_highpass_coeffs(p.hpf_freq, self.sample_rate),
+            highshelf_2p_coeffs(10_000.0, p.air_db, self.sample_rate),
+        )
+    }
+
     /// Process one block of audio across all channels. Parameters are read from the shared
     /// [`Arc<PreVocalParams>`] once per block, so the smoothers advance in a consistent way.
     pub fn process_block(&mut self, channels: &mut [&mut [f32]]) {
-        // Advance the smoothers by a whole block so automation and GUI changes
-        // reach their target in real time instead of one sample step per block.
         let num_frames = channels.first().map_or(0, |c| c.len());
-        if num_frames == 0 {
+        let Some(p) = self.block_params(num_frames) else {
             return;
-        }
-        let steps = num_frames as u32;
-        let drive = self.params.drive.smoothed.next_step(steps);
-        let hpf_freq = self.params.hpf.smoothed.next_step(steps);
-        let air_db = self.params.air.smoothed.next_step(steps);
-        let phase_invert = self.params.phase_flip.modulated_plain_value();
-        let trim = self.params.output_trim.smoothed.next_step(steps);
-        let hpf_coeffs = butterworth_2p_highpass_coeffs(hpf_freq, self.sample_rate);
-        let air_coeffs = highshelf_2p_coeffs(10_000.0, air_db, self.sample_rate);
+        };
+        let (hpf_coeffs, air_coeffs) = self.coeffs_for(&p);
 
         for (channel, samples) in channels.iter_mut().enumerate() {
             let mut hpf = self.filter_states[channel].hpf;
@@ -363,9 +387,9 @@ impl PreVocalDsp {
             for sample in samples.iter_mut() {
                 *sample = process_sample(
                     *sample,
-                    drive,
-                    phase_invert,
-                    trim,
+                    p.drive,
+                    p.phase_invert,
+                    p.trim,
                     &hpf_coeffs,
                     &mut hpf,
                     &air_coeffs,
@@ -373,6 +397,35 @@ impl PreVocalDsp {
                 );
             }
             self.filter_states[channel] = ChannelFilter { hpf, air };
+        }
+    }
+
+    /// Process one block of interleaved audio in place (frame-major: `[ch0, ch1, ch0, ch1, ...]`).
+    /// Allocates nothing; used by the standalone for low-latency, glitch-free callbacks.
+    pub fn process_interleaved(&mut self, samples: &mut [f32], num_channels: usize) {
+        let num_frames = samples.len() / num_channels;
+        let Some(p) = self.block_params(num_frames) else {
+            return;
+        };
+        let (hpf_coeffs, air_coeffs) = self.coeffs_for(&p);
+
+        for frame in 0..num_frames {
+            for channel in 0..num_channels {
+                let idx = frame * num_channels + channel;
+                let mut hpf = self.filter_states[channel].hpf;
+                let mut air = self.filter_states[channel].air;
+                samples[idx] = process_sample(
+                    samples[idx],
+                    p.drive,
+                    p.phase_invert,
+                    p.trim,
+                    &hpf_coeffs,
+                    &mut hpf,
+                    &air_coeffs,
+                    &mut air,
+                );
+                self.filter_states[channel] = ChannelFilter { hpf, air };
+            }
         }
     }
 }

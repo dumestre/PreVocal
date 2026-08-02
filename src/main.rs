@@ -8,10 +8,15 @@
 //! The audio graph is:
 //!
 //! ```text
-//! system mic (default input device) -> DSP -> ring buffer -> speakers (default output device)
-//!                    |                                   |
-//!                    +--> IN meter (raw input)          +--> OUT meter (processed output)
+//! selected input device -> DSP -> ring buffer -> selected output device
+//!            |                                    |
+//!            +--> IN meter (raw input)           +--> OUT meter (processed output)
 //! ```
+//!
+//! The toolbar lets you pick the audio driver/host and device (e.g. ASIO or WASAPI),
+//! restart the engine and rescan the device list. The last selection is persisted to a
+//! small file so it is restored on the next launch. When a device only supports input
+//! (or only output), the other side falls back to the host's default device.
 
 #![cfg_attr(not(feature = "standalone"), allow(dead_code))]
 
@@ -172,54 +177,346 @@ mod standalone {
     }
 
     // ---------------------------------------------------------------------
-    // Audio engine running the realtime DSP on the cpal callback thread.
-    // It operates in the output channel layout (mono input gets duplicated,
-    // excess input channels get folded down).
+    // Real-time DSP wrapper operating on the interleaved buffer directly,
+    // so the cpal callbacks never allocate beyond a single Vec per block.
     // ---------------------------------------------------------------------
 
     struct AudioEngine {
-        _params: Arc<PreVocalParams>,
         dsp: PreVocalDsp,
-        _sample_rate: f32,
         num_channels: usize,
-        work: Vec<Vec<f32>>,
     }
 
     impl AudioEngine {
         fn new(params: Arc<PreVocalParams>, sample_rate: f32, num_channels: usize) -> Self {
-            let mut dsp = PreVocalDsp::new(params.clone());
+            let mut dsp = PreVocalDsp::new(params);
             dsp.set_sample_rate(sample_rate);
             dsp.resize(num_channels);
-            Self {
-                _params: params,
-                dsp,
-                _sample_rate: sample_rate,
-                num_channels,
-                work: vec![Vec::new(); num_channels],
+            Self { dsp, num_channels }
+        }
+
+        fn process(&mut self, interleaved: &mut [f32]) {
+            self.dsp.process_interleaved(interleaved, self.num_channels);
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Meter state shared with the GUI poll thread.
+    // ---------------------------------------------------------------------
+
+    #[derive(Default)]
+    struct MeterState {
+        in_level: f32,
+        in_peak: f32,
+        out_level: f32,
+        out_peak: f32,
+    }
+
+    // ---------------------------------------------------------------------
+    // Meter scale. Levels are exposed to the UI as a 0..1 mapping of the
+    // dBFS scale: -60 dB => 0.0, 0 dB => 1.0. The Slint meter colors the
+    // zones green (< -6 dB), yellow (-6..-3 dB) and red (>= -3 dB clip).
+    // ---------------------------------------------------------------------
+
+    fn level_to_meter(rms: f32) -> f32 {
+        if rms <= 0.0 {
+            return 0.0;
+        }
+        let db = 20.0 * rms.log10();
+        ((db + 60.0) / 60.0).clamp(0.0, 1.0)
+    }
+
+    // ---------------------------------------------------------------------
+    // Audio manager: enumerates hosts + devices, keeps the selected device
+    // alive and owns the cpal streams. The GUI talks to it through a Mutex.
+    // ---------------------------------------------------------------------
+
+    /// A single selectable host/device pair.
+    #[derive(Clone)]
+    struct DeviceEntry {
+        host_id: cpal::HostId,
+        device_name: String,
+        device: cpal::Device,
+    }
+
+    struct AudioManager {
+        params: Arc<PreVocalParams>,
+        entries: Vec<DeviceEntry>,
+        labels: Vec<String>,
+        current: usize,
+        /// Gates the audio callbacks (toggled on stop/start).
+        active: Arc<AtomicBool>,
+        /// Keeps the meter poll thread alive for the whole app lifetime.
+        alive: Arc<AtomicBool>,
+        meters: Arc<Mutex<MeterState>>,
+        streams: Option<Vec<cpal::Stream>>,
+        status: String,
+    }
+
+    impl AudioManager {
+        fn new(params: Arc<PreVocalParams>) -> Self {
+            let entries = Self::enumerate_entries();
+            let labels = Self::make_labels(&entries);
+            let mut mgr = Self {
+                params,
+                entries,
+                labels,
+                current: 0,
+                active: Arc::new(AtomicBool::new(false)),
+                alive: Arc::new(AtomicBool::new(true)),
+                meters: Arc::new(Mutex::new(MeterState::default())),
+                streams: None,
+                status: String::new(),
+            };
+
+            // Restore the last used device if it's still present.
+            if let Some((host_name, device_name)) = Self::load_last_selection()
+                && let Some(idx) = mgr.entries.iter().position(|e| {
+                    e.host_id.name().eq_ignore_ascii_case(&host_name)
+                        && e.device_name.eq_ignore_ascii_case(&device_name)
+                })
+            {
+                mgr.current = idx;
+            }
+
+            if let Err(e) = mgr.start() {
+                tracing::error!("Audio start failed: {e}");
+            }
+            mgr
+        }
+
+        fn enumerate_entries() -> Vec<DeviceEntry> {
+            let mut entries = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for host_id in cpal::available_hosts() {
+                let Ok(host) = cpal::host_from_id(host_id) else {
+                    continue;
+                };
+                let mut add = |device: cpal::Device| {
+                    let name = device.to_string();
+                    if seen.insert((host_id, name.clone())) {
+                        entries.push(DeviceEntry {
+                            host_id,
+                            device_name: name,
+                            device,
+                        });
+                    }
+                };
+                if let Ok(devices) = host.devices() {
+                    for device in devices {
+                        add(device);
+                    }
+                }
+                if let Some(device) = host.default_input_device() {
+                    add(device);
+                }
+                if let Some(device) = host.default_output_device() {
+                    add(device);
+                }
+            }
+            entries
+        }
+
+        fn make_labels(entries: &[DeviceEntry]) -> Vec<String> {
+            entries
+                .iter()
+                .map(|e| format!("{} — {}", e.host_id.name(), e.device_name))
+                .collect()
+        }
+
+        // Persisted selection (host name + device name), stored next to the executable.
+        fn settings_path() -> std::path::PathBuf {
+            std::env::current_dir()
+                .unwrap_or_default()
+                .join("prevocal-last-device.txt")
+        }
+
+        fn load_last_selection() -> Option<(String, String)> {
+            let text = std::fs::read_to_string(Self::settings_path()).ok()?;
+            let mut lines = text.lines();
+            let host = lines.next()?.trim().to_string();
+            let device = lines.next()?.trim().to_string();
+            if host.is_empty() || device.is_empty() {
+                return None;
+            }
+            Some((host, device))
+        }
+
+        fn save_last_selection(&self) {
+            if let Some(entry) = self.entries.get(self.current) {
+                let _ = std::fs::write(
+                    Self::settings_path(),
+                    format!("{}\n{}\n", entry.host_id.name(), entry.device_name),
+                );
             }
         }
 
-        fn process_block(&mut self, input: &[f32], output: &mut [f32]) {
-            let num_frames = output.len() / self.num_channels;
-            for channel_work in self.work.iter_mut() {
-                channel_work.clear();
-                channel_work.reserve(num_frames);
+        fn stop(&mut self) {
+            self.active.store(false, Ordering::Relaxed);
+            self.streams.take();
+        }
+
+        fn start(&mut self) -> Result<(), String> {
+            self.stop();
+            let result = self.try_start();
+            match &result {
+                Ok(status) => self.status = status.clone(),
+                Err(e) => self.status = format!("ERROR: {e}"),
             }
-            for frame in 0..num_frames {
-                for channel in 0..self.num_channels {
-                    self.work[channel].push(input[frame * self.num_channels + channel]);
-                }
+            result.map(|_| ())
+        }
+
+        fn try_start(&mut self) -> Result<String, String> {
+            let entry = self
+                .entries
+                .get(self.current)
+                .cloned()
+                .ok_or_else(|| "No audio device selected.".to_string())?;
+            let host = cpal::host_from_id(entry.host_id)
+                .map_err(|e| format!("Could not load host '{}': {e}", entry.host_id.name()))?;
+
+            // Use the selected device for whichever side it supports; fall back to the
+            // host's default for the other side (e.g. a mic-only or speaker-only device).
+            let input_device = if entry.device.supports_input() {
+                entry.device.clone()
+            } else {
+                host.default_input_device().ok_or_else(|| {
+                    format!("No input device available for host '{}'.", entry.host_id.name())
+                })?
+            };
+            let output_device = if entry.device.supports_output() {
+                entry.device.clone()
+            } else {
+                host.default_output_device().ok_or_else(|| {
+                    format!("No output device available for host '{}'.", entry.host_id.name())
+                })?
+            };
+
+            let output_default = output_device
+                .default_output_config()
+                .map_err(|e| format!("Could not query output config for '{output_device}': {e}"))?;
+            let sample_rate = output_default.sample_rate();
+            let output_channels = output_default.channels() as usize;
+            let output_sample_format = output_default.sample_format();
+            let output_config = output_default.config();
+
+            let (input_config, input_sample_format) = pick_input_config(&input_device, sample_rate)?;
+            let input_channels = input_config.channels as usize;
+
+            let engine = Arc::new(Mutex::new(AudioEngine::new(
+                self.params.clone(),
+                sample_rate as f32,
+                output_channels,
+            )));
+            let shared_out = Arc::new(Mutex::new(FrameRing::new(8192, output_channels)));
+            let active = self.active.clone();
+            active.store(true, Ordering::Relaxed);
+
+            let input_stream = build_input_stream_by_format(
+                &input_device,
+                &input_config,
+                input_sample_format,
+                engine.clone(),
+                input_channels,
+                output_channels,
+                shared_out.clone(),
+                active.clone(),
+                self.meters.clone(),
+            )?;
+
+            let output_stream = build_output_stream_by_format(
+                &output_device,
+                &output_config,
+                output_sample_format,
+                shared_out.clone(),
+                active.clone(),
+                self.meters.clone(),
+            )?;
+
+            input_stream
+                .play()
+                .map_err(|e| format!("Could not start input stream: {e}"))?;
+            output_stream
+                .play()
+                .map_err(|e| format!("Could not start output stream: {e}"))?;
+
+            self.streams = Some(vec![input_stream, output_stream]);
+            self.save_last_selection();
+
+            Ok(format!(
+                "RUNNING — {} ({} Hz, {} in / {} out ch)",
+                entry.device_name, sample_rate, input_channels, output_channels
+            ))
+        }
+
+        fn select(&mut self, idx: usize) {
+            if idx >= self.entries.len() || idx == self.current {
+                return;
+            }
+            self.current = idx;
+            if let Err(e) = self.start() {
+                tracing::error!("Audio restart failed: {e}");
+            }
+        }
+
+        /// Select a device by its ComboBox label ("HOST — DEVICE").
+        fn select_by_label(&mut self, label: &str) {
+            if let Some(idx) = self.labels.iter().position(|l| l == label) {
+                self.select(idx);
+            }
+        }
+
+        fn refresh(&mut self) {
+            let previous = self
+                .entries
+                .get(self.current)
+                .map(|e| (e.host_id, e.device_name.clone()));
+            self.stop();
+            self.entries = Self::enumerate_entries();
+            self.labels = Self::make_labels(&self.entries);
+
+            if let Some((host_id, name)) = previous {
+                let found = self
+                    .entries
+                    .iter()
+                    .position(|e| e.host_id == host_id && e.device_name == name)
+                    .or_else(|| self.entries.iter().position(|e| e.host_id == host_id))
+                    .unwrap_or(0);
+                self.current = found;
+            } else {
+                self.current = 0;
             }
 
-            let mut slices: Vec<&mut [f32]> =
-                self.work.iter_mut().map(|w| w.as_mut_slice()).collect();
-            self.dsp.process_block(&mut slices);
-
-            for frame in 0..num_frames {
-                for channel in 0..self.num_channels {
-                    output[frame * self.num_channels + channel] = self.work[channel][frame];
-                }
+            if self.entries.is_empty() {
+                self.status = "ERROR: no audio devices found".to_string();
+                return;
             }
+            if let Err(e) = self.start() {
+                tracing::error!("Audio restart failed: {e}");
+            }
+        }
+
+        fn shutdown(&mut self) {
+            self.alive.store(false, Ordering::Relaxed);
+            self.stop();
+        }
+
+        fn device_index(&self) -> i32 {
+            self.current as i32
+        }
+
+        fn driver_name(&self) -> String {
+            self.entries
+                .get(self.current)
+                .map(|e| e.host_id.name().to_string())
+                .unwrap_or_default()
+        }
+
+        fn is_running(&self) -> bool {
+            self.status.starts_with("RUNNING")
+        }
+
+        fn status(&self) -> String {
+            self.status.clone()
         }
     }
 
@@ -229,6 +526,7 @@ mod standalone {
     // for the whole application lifetime (a dropped `Stream` stops playback).
     // ---------------------------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     fn build_input_stream<T>(
         input_device: &cpal::Device,
         input_config: &cpal::StreamConfig,
@@ -237,14 +535,14 @@ mod standalone {
         engine_channels: usize,
         shared_out: Arc<Mutex<FrameRing>>,
         active: Arc<AtomicBool>,
-        input_level: Arc<Mutex<f32>>,
+        meters: Arc<Mutex<MeterState>>,
     ) -> Result<cpal::Stream, cpal::Error>
     where
         T: SizedSample + FromSample<f32>,
         f32: FromSample<T>,
     {
         input_device.build_input_stream(
-            input_config.clone(),
+            *input_config,
             move |data: &[T], _| {
                 if !active.load(Ordering::Relaxed) {
                     return;
@@ -266,23 +564,28 @@ mod standalone {
                     }
                 }
 
-                // IN meter: RMS of the raw, pre-DSP input signal.
+                // IN meter: RMS + peak of the raw, pre-DSP input signal.
                 let mut sum_sq = 0.0f32;
+                let mut peak = 0.0f32;
                 for &s in interleaved.iter() {
                     sum_sq += s * s;
+                    let a = s.abs();
+                    if a > peak {
+                        peak = a;
+                    }
                 }
                 let rms = if interleaved.is_empty() {
                     0.0
                 } else {
                     (sum_sq / interleaved.len() as f32).sqrt()
                 };
-                if let Ok(mut lvl) = input_level.lock() {
-                    *lvl = rms.clamp(0.0, 1.0);
+                if let Ok(mut m) = meters.lock() {
+                    m.in_level = level_to_meter(rms);
+                    m.in_peak = peak;
                 }
 
-                let mut processed = vec![0.0f32; interleaved.len()];
-                engine.lock().unwrap().process_block(&interleaved, &mut processed);
-                shared_out.lock().unwrap().write(&processed);
+                engine.lock().unwrap().process(&mut interleaved);
+                shared_out.lock().unwrap().write(&interleaved);
             },
             |err| tracing::error!("Input stream error: {err}"),
             None,
@@ -294,7 +597,7 @@ mod standalone {
         output_config: &cpal::StreamConfig,
         shared_out: Arc<Mutex<FrameRing>>,
         active: Arc<AtomicBool>,
-        output_level: Arc<Mutex<f32>>,
+        meters: Arc<Mutex<MeterState>>,
     ) -> Result<cpal::Stream, cpal::Error>
     where
         T: SizedSample + FromSample<f32>,
@@ -302,7 +605,7 @@ mod standalone {
     {
         let output_channels = output_config.channels as usize;
         output_device.build_output_stream(
-            output_config.clone(),
+            *output_config,
             move |data: &mut [T], _| {
                 if !active.load(Ordering::Relaxed) {
                     for sample in data.iter_mut() {
@@ -315,18 +618,24 @@ mod standalone {
                 let filled_frames = shared_out.lock().unwrap().read(&mut buffer);
                 let filled_samples = filled_frames * output_channels;
 
-                // OUT meter: RMS of the processed signal actually going to the speakers.
+                // OUT meter: RMS + peak of the processed signal going to the speakers.
                 let mut sum_sq = 0.0f32;
+                let mut peak = 0.0f32;
                 for &v in buffer[..filled_samples].iter() {
                     sum_sq += v * v;
+                    let a = v.abs();
+                    if a > peak {
+                        peak = a;
+                    }
                 }
                 let rms = if filled_samples == 0 {
                     0.0
                 } else {
                     (sum_sq / filled_samples as f32).sqrt()
                 };
-                if let Ok(mut lvl) = output_level.lock() {
-                    *lvl = rms.clamp(0.0, 1.0);
+                if let Ok(mut m) = meters.lock() {
+                    m.out_level = level_to_meter(rms);
+                    m.out_peak = peak;
                 }
 
                 for (i, sample) in data.iter_mut().enumerate() {
@@ -342,6 +651,7 @@ mod standalone {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_input_stream_by_format(
         input_device: &cpal::Device,
         input_config: &cpal::StreamConfig,
@@ -351,7 +661,7 @@ mod standalone {
         engine_channels: usize,
         shared_out: Arc<Mutex<FrameRing>>,
         active: Arc<AtomicBool>,
-        input_level: Arc<Mutex<f32>>,
+        meters: Arc<Mutex<MeterState>>,
     ) -> Result<cpal::Stream, String> {
         macro_rules! build_input_streams {
             ($($format:path => $ty:ty),+ $(,)?) => {
@@ -365,7 +675,7 @@ mod standalone {
                             engine_channels,
                             shared_out.clone(),
                             active.clone(),
-                            input_level.clone(),
+                            meters.clone(),
                         )
                         .map_err(|e| format!("Could not build input stream: {e}")),
                     )+
@@ -393,7 +703,7 @@ mod standalone {
         format: cpal::SampleFormat,
         shared_out: Arc<Mutex<FrameRing>>,
         active: Arc<AtomicBool>,
-        output_level: Arc<Mutex<f32>>,
+        meters: Arc<Mutex<MeterState>>,
     ) -> Result<cpal::Stream, String> {
         macro_rules! build_output_streams {
             ($($format:path => $ty:ty),+ $(,)?) => {
@@ -404,7 +714,7 @@ mod standalone {
                             output_config,
                             shared_out.clone(),
                             active.clone(),
-                            output_level.clone(),
+                            meters.clone(),
                         )
                         .map_err(|e| format!("Could not build output stream: {e}")),
                     )+
@@ -456,113 +766,36 @@ mod standalone {
         Ok((default.config(), default.sample_format()))
     }
 
-    /// Set up audio using the system's default input and output devices. Returns
-    /// the streams so the caller can keep them alive for the whole app lifetime.
-    fn setup_audio(
-        params: Arc<PreVocalParams>,
-    ) -> Result<
-        (
-            Vec<cpal::Stream>,
-            Arc<Mutex<AudioEngine>>,
-            Arc<AtomicBool>,
-            Arc<Mutex<f32>>,
-            Arc<Mutex<f32>>,
-            Arc<Mutex<FrameRing>>,
-        ),
-        String,
-    > {
-        let host = cpal::default_host();
-        let input_device = host
-            .default_input_device()
-            .ok_or_else(|| "No default audio input device found.".to_string())?;
-        let output_device = host
-            .default_output_device()
-            .ok_or_else(|| "No default audio output device found.".to_string())?;
-
-        let output_default = output_device
-            .default_output_config()
-            .map_err(|e| format!("Could not query default output config: {e}"))?;
-        let sample_rate = output_default.sample_rate();
-        let output_channels = output_default.channels() as usize;
-        let output_sample_format = output_default.sample_format();
-        let output_config = output_default.config();
-
-        let (input_config, input_sample_format) = pick_input_config(&input_device, sample_rate)?;
-        let input_channels = input_config.channels as usize;
-
-        if input_channels != output_channels {
-            tracing::warn!(
-                "Input ({input_channels} ch) and output ({output_channels} ch) differ; mapping to the output layout."
-            );
-        }
-
-        let engine = Arc::new(Mutex::new(AudioEngine::new(
-            params,
-            sample_rate as f32,
-            output_channels,
-        )));
-        let shared_out = Arc::new(Mutex::new(FrameRing::new(8192, output_channels)));
-        let active = Arc::new(AtomicBool::new(true));
-        let input_level = Arc::new(Mutex::new(0.0f32));
-        let output_level = Arc::new(Mutex::new(0.0f32));
-
-        let input_stream = build_input_stream_by_format(
-            &input_device,
-            &input_config,
-            input_sample_format,
-            engine.clone(),
-            input_channels,
-            output_channels,
-            shared_out.clone(),
-            active.clone(),
-            input_level.clone(),
-        )?;
-
-        let output_stream = build_output_stream_by_format(
-            &output_device,
-            &output_config,
-            output_sample_format,
-            shared_out.clone(),
-            active.clone(),
-            output_level.clone(),
-        )?;
-
-        input_stream
-            .play()
-            .map_err(|e| format!("Could not start input stream: {e}"))?;
-        output_stream
-            .play()
-            .map_err(|e| format!("Could not start output stream: {e}"))?;
-
-        Ok((
-            vec![input_stream, output_stream],
-            engine,
-            active,
-            input_level,
-            output_level,
-            shared_out,
-        ))
-    }
-
     // ---------------------------------------------------------------------
     // Slint UI setup + event loop.
     // ---------------------------------------------------------------------
 
-    fn run_gui(
-        bridge: Arc<UiBridge>,
-        engine: Arc<Mutex<AudioEngine>>,
-        shared_out: Arc<Mutex<FrameRing>>,
-        active: Arc<AtomicBool>,
-        input_level: Arc<Mutex<f32>>,
-        output_level: Arc<Mutex<f32>>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let ui = PreVocalUI::new()?;
+    fn string_model(v: &[String]) -> slint::ModelRc<slint::SharedString> {
+        let items: Vec<slint::SharedString> = v.iter().map(|s| s.as_str().into()).collect();
+        slint::ModelRc::new(slint::VecModel::from(items))
+    }
 
+    fn run_gui(
+        ui: PreVocalUI,
+        bridge: Arc<UiBridge>,
+        manager: Arc<Mutex<AudioManager>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         ui.set_drive(bridge.drive_value());
         ui.set_hpf(bridge.hpf_value());
         ui.set_air(bridge.air_value());
         ui.set_output_trim(bridge.output_trim_value());
         ui.set_phase_flip(bridge.phase_value());
+
+        {
+            let mgr = manager.lock().unwrap();
+            ui.set_available_devices(string_model(&mgr.labels));
+            ui.set_device_index(mgr.device_index());
+            ui.set_driver_name(mgr.driver_name().into());
+            ui.set_audio_status(mgr.status().into());
+            ui.set_audio_running(mgr.is_running());
+        }
+
+        let ui_weak = ui.as_weak();
 
         let bridge_drive = Arc::clone(&bridge);
         ui.on_drive_changed(move |v| bridge_drive.write_drive(v));
@@ -579,25 +812,80 @@ mod standalone {
         let bridge_phase = Arc::clone(&bridge);
         ui.on_phase_flip_changed(move |v| bridge_phase.write_phase(v));
 
-        let _ = (&engine, &shared_out);
+        // The user picked a device in the ComboBox: switch the audio engine to it.
+        let mgr_select = Arc::clone(&manager);
+        let weak_select = ui_weak.clone();
+        ui.on_device_selected(move |label: slint::SharedString| {
+            let mut mgr = mgr_select.lock().unwrap();
+            mgr.select_by_label(label.as_str());
+            if let Some(ui) = weak_select.upgrade() {
+                ui.set_device_index(mgr.device_index());
+                ui.set_driver_name(mgr.driver_name().into());
+                ui.set_audio_status(mgr.status().into());
+                ui.set_audio_running(mgr.is_running());
+            }
+        });
 
-        // Poll the level shared values and drive the UI meters with a little
-        // ballistics smoothing so they don't flicker.
-        let ui_weak = ui.as_weak();
-        let input_poll = Arc::clone(&input_level);
-        let output_poll = Arc::clone(&output_level);
-        let active_poll = active.clone();
+        // Rescan the host/device lists (e.g. after plugging in an interface).
+        let mgr_refresh = Arc::clone(&manager);
+        let weak_refresh = ui_weak.clone();
+        ui.on_refresh_clicked(move || {
+            let mut mgr = mgr_refresh.lock().unwrap();
+            mgr.refresh();
+            if let Some(ui) = weak_refresh.upgrade() {
+                ui.set_available_devices(string_model(&mgr.labels));
+                ui.set_device_index(mgr.device_index());
+                ui.set_driver_name(mgr.driver_name().into());
+                ui.set_audio_status(mgr.status().into());
+                ui.set_audio_running(mgr.is_running());
+            }
+        });
+
+        // Force a restart with the currently selected device (applies after errors).
+        let mgr_restart = Arc::clone(&manager);
+        let weak_restart = ui_weak.clone();
+        ui.on_restart_clicked(move || {
+            let mut mgr = mgr_restart.lock().unwrap();
+            if let Err(e) = mgr.start() {
+                tracing::error!("Audio restart failed: {e}");
+            }
+            if let Some(ui) = weak_restart.upgrade() {
+                ui.set_device_index(mgr.device_index());
+                ui.set_driver_name(mgr.driver_name().into());
+                ui.set_audio_status(mgr.status().into());
+                ui.set_audio_running(mgr.is_running());
+            }
+        });
+
+        // Poll the meter values and drive the UI with a little ballistics smoothing.
+        let meters = manager.lock().unwrap().meters.clone();
+        let alive = manager.lock().unwrap().alive.clone();
+        let weak_meter = ui_weak.clone();
         std::thread::spawn(move || {
             use std::time::Duration;
             let mut smooth_in = 0.0f32;
             let mut smooth_out = 0.0f32;
-            while active_poll.load(Ordering::Relaxed) {
-                let in_lvl = *input_poll.lock().unwrap();
-                let out_lvl = *output_poll.lock().unwrap();
+            let mut peak_in = 0.0f32;
+            let mut peak_out = 0.0f32;
+            while alive.load(Ordering::Relaxed) {
+                let m = meters.lock().unwrap();
+                let in_lvl = m.in_level;
+                let in_pk = level_to_meter(m.in_peak);
+                let out_lvl = m.out_level;
+                let out_pk = level_to_meter(m.out_peak);
+                drop(m);
+
                 smooth_in += (in_lvl - smooth_in) * 0.45;
                 smooth_out += (out_lvl - smooth_out) * 0.45;
-                let _ = ui_weak.upgrade_in_event_loop(move |ui| ui.set_input_level(smooth_in));
-                let _ = ui_weak.upgrade_in_event_loop(move |ui| ui.set_output_level(smooth_out));
+                peak_in = peak_in.max(in_pk);
+                peak_out = peak_out.max(out_pk);
+                peak_in = (peak_in - 0.02).max(in_pk);
+                peak_out = (peak_out - 0.02).max(out_pk);
+
+                let _ = weak_meter.upgrade_in_event_loop(move |ui| ui.set_input_level(smooth_in));
+                let _ = weak_meter.upgrade_in_event_loop(move |ui| ui.set_output_level(smooth_out));
+                let _ = weak_meter.upgrade_in_event_loop(move |ui| ui.set_input_peak(peak_in));
+                let _ = weak_meter.upgrade_in_event_loop(move |ui| ui.set_output_peak(peak_out));
                 std::thread::sleep(Duration::from_millis(40));
             }
         });
@@ -610,33 +898,24 @@ mod standalone {
         let params = Arc::new(PreVocalParams::default());
         let bridge = UiBridge::new(&params);
 
-        // The streams must stay alive while the GUI runs, otherwise cpal stops the
-        // audio as soon as they are dropped.
-        let (streams, engine, active, input_level, output_level, shared_out) =
-            match setup_audio(params) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("{e}");
-                    std::process::exit(1);
-                }
-            };
+        // The manager owns the cpal streams, which must stay alive while the GUI
+        // runs, otherwise cpal stops the audio as soon as they are dropped.
+        let manager = Arc::new(Mutex::new(AudioManager::new(params)));
 
-        if let Err(e) = run_gui(
-            bridge.into(),
-            engine,
-            shared_out,
-            active,
-            input_level,
-            output_level,
-        ) {
+        let ui = match PreVocalUI::new() {
+            Ok(ui) => ui,
+            Err(e) => {
+                eprintln!("GUI error: {e}");
+                manager.lock().unwrap().shutdown();
+                return;
+            }
+        };
+
+        if let Err(e) = run_gui(ui, bridge.into(), manager.clone()) {
             eprintln!("GUI error: {e}");
         }
 
-        // Explicitly stop audio before exiting.
-        for stream in &streams {
-            let _ = stream.pause();
-        }
-        drop(streams);
+        manager.lock().unwrap().shutdown();
     }
 }
 
