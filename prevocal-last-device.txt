@@ -1,2 +1,2 @@
 WASAPI
-Alto-falantes (Scarlett Solo USB)
+Microfone (Scarlett Solo USB)

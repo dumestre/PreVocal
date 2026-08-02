@@ -143,13 +143,23 @@ mod standalone {
             }
         }
 
+        /// Write interleaved frames into the ring. If the buffer would overflow, the
+        /// *newest* frames are dropped (the oldest of the incoming block) instead of
+        /// advancing `read_idx`; skipping ahead in the playback path would create a
+        /// discontinuity (click) in the output signal.
         fn write(&mut self, interleaved: &[f32]) {
             let cap = self.capacity_frames();
             let num_frames = interleaved.len() / self.channels;
             let excess = (self.frames + num_frames).saturating_sub(cap);
             if excess > 0 {
-                self.read_idx = (self.read_idx + excess * self.channels) % self.data.len();
-                self.frames -= excess;
+                let skip = excess.min(num_frames);
+                let start = skip * self.channels;
+                for &sample in interleaved[start..].iter() {
+                    self.data[self.write_idx] = sample;
+                    self.write_idx = (self.write_idx + 1) % self.data.len();
+                }
+                self.frames += num_frames - skip;
+                return;
             }
             for &sample in interleaved {
                 self.data[self.write_idx] = sample;
@@ -407,7 +417,10 @@ mod standalone {
                 sample_rate as f32,
                 output_channels,
             )));
-            let shared_out = Arc::new(Mutex::new(FrameRing::new(8192, output_channels)));
+            // Small ring: roughly ~20 ms at 48 kHz (was 8192 frames ≈ 170 ms). The
+            // underrun/overflow handling keeps it glitch-free, so latency stays low.
+            let ring_capacity = (sample_rate as usize / 50).clamp(512, 4096);
+            let shared_out = Arc::new(Mutex::new(FrameRing::new(ring_capacity, output_channels)));
             let active = self.active.clone();
             active.store(true, Ordering::Relaxed);
 
@@ -432,12 +445,15 @@ mod standalone {
                 self.meters.clone(),
             )?;
 
-            input_stream
-                .play()
-                .map_err(|e| format!("Could not start input stream: {e}"))?;
+            // Start the output stream first so it consumes the ring while it is still
+            // empty. Starting the input first would fill the whole ring (~170 ms of
+            // buffered audio) before any playback begins, adding noticeable latency.
             output_stream
                 .play()
                 .map_err(|e| format!("Could not start output stream: {e}"))?;
+            input_stream
+                .play()
+                .map_err(|e| format!("Could not start input stream: {e}"))?;
 
             self.streams = Some(vec![input_stream, output_stream]);
             self.save_last_selection();
@@ -541,6 +557,8 @@ mod standalone {
         T: SizedSample + FromSample<f32>,
         f32: FromSample<T>,
     {
+        // Reused buffer so the realtime callback never allocates.
+        let mut interleaved: Vec<f32> = Vec::new();
         input_device.build_input_stream(
             *input_config,
             move |data: &[T], _| {
@@ -548,19 +566,21 @@ mod standalone {
                     return;
                 }
 
-                // Map the device's channel layout onto the engine layout, duplicating
-                // a mono input to stereo (or folding down excess channels).
+                // Map the device's channel layout onto the engine layout. A vocal preamp
+                // is inherently mono-centric: the input channels are downmixed to a single
+                // mono signal and duplicated across every engine channel, so a mono mic
+                // (or a mic on just the left side of a stereo interface) reaches both
+                // output channels.
                 let frames = data.len() / input_channels;
-                let mut interleaved = vec![0.0f32; frames * engine_channels];
+                interleaved.resize(frames * engine_channels, 0.0);
                 for frame in 0..frames {
-                    for ch in 0..engine_channels {
-                        let in_ch = if input_channels == 1 {
-                            0
-                        } else {
-                            ch.min(input_channels - 1)
-                        };
-                        interleaved[frame * engine_channels + ch] =
-                            data[frame * input_channels + in_ch].to_sample::<f32>();
+                    let mut mono = 0.0f32;
+                    for in_ch in 0..input_channels {
+                        mono += data[frame * input_channels + in_ch].to_sample::<f32>();
+                    }
+                    mono /= input_channels as f32;
+                    for out_ch in 0..engine_channels {
+                        interleaved[frame * engine_channels + out_ch] = mono;
                     }
                 }
 
@@ -604,17 +624,21 @@ mod standalone {
         f32: FromSample<T>,
     {
         let output_channels = output_config.channels as usize;
+        // Reused buffers so the realtime callback never allocates.
+        let mut buffer: Vec<f32> = Vec::new();
+        let mut last_sample = 0.0f32;
         output_device.build_output_stream(
             *output_config,
             move |data: &mut [T], _| {
                 if !active.load(Ordering::Relaxed) {
+                    last_sample = 0.0;
                     for sample in data.iter_mut() {
                         *sample = 0.0f32.to_sample::<T>();
                     }
                     return;
                 }
 
-                let mut buffer = vec![0.0f32; data.len()];
+                buffer.resize(data.len(), 0.0);
                 let filled_frames = shared_out.lock().unwrap().read(&mut buffer);
                 let filled_samples = filled_frames * output_channels;
 
@@ -638,13 +662,20 @@ mod standalone {
                     m.out_peak = peak;
                 }
 
+                // On underrun, hold the last valid sample instead of writing zeros;
+                // repeating a constant avoids the hard discontinuity (click) that
+                // silence gaps produce when the audio resumes.
+                let mut held = last_sample;
                 for (i, sample) in data.iter_mut().enumerate() {
-                    *sample = if i < filled_samples {
-                        buffer[i].to_sample::<T>()
+                    let v = if i < filled_samples {
+                        buffer[i]
                     } else {
-                        0.0f32.to_sample::<T>()
+                        held
                     };
+                    held = v;
+                    *sample = v.to_sample::<T>();
                 }
+                last_sample = held;
             },
             |err| tracing::error!("Output stream error: {err}"),
             None,
