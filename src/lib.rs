@@ -342,11 +342,18 @@ impl PreVocalDsp {
     /// Process one block of audio across all channels. Parameters are read from the shared
     /// [`Arc<PreVocalParams>`] once per block, so the smoothers advance in a consistent way.
     pub fn process_block(&mut self, channels: &mut [&mut [f32]]) {
-        let drive = self.params.drive.smoothed.next();
-        let hpf_freq = self.params.hpf.smoothed.next();
-        let air_db = self.params.air.smoothed.next();
+        // Advance the smoothers by a whole block so automation and GUI changes
+        // reach their target in real time instead of one sample step per block.
+        let num_frames = channels.first().map_or(0, |c| c.len());
+        if num_frames == 0 {
+            return;
+        }
+        let steps = num_frames as u32;
+        let drive = self.params.drive.smoothed.next_step(steps);
+        let hpf_freq = self.params.hpf.smoothed.next_step(steps);
+        let air_db = self.params.air.smoothed.next_step(steps);
         let phase_invert = self.params.phase_flip.modulated_plain_value();
-        let trim = self.params.output_trim.smoothed.next();
+        let trim = self.params.output_trim.smoothed.next_step(steps);
         let hpf_coeffs = butterworth_2p_highpass_coeffs(hpf_freq, self.sample_rate);
         let air_coeffs = highshelf_2p_coeffs(10_000.0, air_db, self.sample_rate);
 

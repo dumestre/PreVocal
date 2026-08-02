@@ -1,15 +1,24 @@
 //! PreVocal standalone binary.
 //!
-//! This target runs the same DSP as the plugin as a native Linux application using Slint for
-//! the GUI and cpal for realtime audio I/O, so it can be tested without a DAW. The DSP lives
-//! in `prevocal::PreVocalDsp` and is shared with the plugin `lib.rs`.
+//! This target runs the same DSP as the plugin as a native application using Slint for
+//! the GUI and cpal for realtime audio I/O, so it can be tested without a DAW on both
+//! Windows and Linux. The DSP lives in `prevocal::PreVocalDsp` and is shared with the
+//! plugin `lib.rs`.
+//!
+//! The audio graph is:
+//!
+//! ```text
+//! system mic (default input device) -> DSP -> ring buffer -> speakers (default output device)
+//!                    |                                   |
+//!                    +--> IN meter (raw input)          +--> OUT meter (processed output)
+//! ```
 
 #![cfg_attr(not(feature = "standalone"), allow(dead_code))]
 
 #[cfg(feature = "standalone")]
 mod standalone {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-    use cpal::{FromSample, Sample};
+    use cpal::{FromSample, Sample, SizedSample};
     use nice_plug::params::InternalParamMut;
     use nice_plug::prelude::*;
     use prevocal::{PreVocalDsp, PreVocalParams};
@@ -164,6 +173,8 @@ mod standalone {
 
     // ---------------------------------------------------------------------
     // Audio engine running the realtime DSP on the cpal callback thread.
+    // It operates in the output channel layout (mono input gets duplicated,
+    // excess input channels get folded down).
     // ---------------------------------------------------------------------
 
     struct AudioEngine {
@@ -213,106 +224,114 @@ mod standalone {
     }
 
     // ---------------------------------------------------------------------
-    // cpal stream setup, generic over the device sample format.
+    // cpal stream builders. Input and output use their own device's sample
+    // format, and both streams are returned so the caller can keep them alive
+    // for the whole application lifetime (a dropped `Stream` stops playback).
     // ---------------------------------------------------------------------
 
-    fn run_stream<T>(
+    fn build_input_stream<T>(
+        input_device: &cpal::Device,
+        input_config: &cpal::StreamConfig,
         engine: Arc<Mutex<AudioEngine>>,
+        input_channels: usize,
+        engine_channels: usize,
         shared_out: Arc<Mutex<FrameRing>>,
         active: Arc<AtomicBool>,
-        shared_level: Arc<Mutex<f32>>,
-        shared_output_level: Arc<Mutex<f32>>,
-    ) -> Result<(), cpal::Error>
+        input_level: Arc<Mutex<f32>>,
+    ) -> Result<cpal::Stream, cpal::Error>
     where
-        T: cpal::SizedSample + FromSample<f32>,
+        T: SizedSample + FromSample<f32>,
         f32: FromSample<T>,
     {
-        let host = cpal::default_host();
-        let input_device = host
-            .default_input_device()
-            .ok_or_else(|| cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable))?;
-        let output_device = host
-            .default_output_device()
-            .ok_or_else(|| cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable))?;
-
-        let output_config = output_device.default_output_config()?;
-        let sample_rate = output_config.sample_rate();
-        let output_channels = output_config.channels() as usize;
-
-        let input_config = match input_device.supported_input_configs() {
-            Ok(configs) => configs
-                .filter_map(|cfg| {
-                    if cfg.min_sample_rate() <= sample_rate
-                        && cfg.max_sample_rate() >= sample_rate
-                    {
-                        Some(cfg.with_sample_rate(sample_rate).config())
-                    } else {
-                        None
-                    }
-                })
-                .min_by_key(|cfg| cfg.channels),
-            Err(_) => None,
-        }
-        .unwrap_or_else(|| input_device.default_input_config().unwrap().config());
-
-        if input_config.channels as usize != output_channels {
-            tracing::warn!(
-                "Input ({} ch) and output ({} ch) channel counts differ.",
-                input_config.channels,
-                output_channels
-            );
-        }
-
-        let input_engine = engine.clone();
-        let input_shared = shared_out.clone();
-        let input_active = active.clone();
-        let input_level = shared_level.clone();
-        let output_level = shared_output_level.clone();
-
-        let input_stream = input_device.build_input_stream::<T, _, _>(
-            input_config,
+        input_device.build_input_stream(
+            input_config.clone(),
             move |data: &[T], _| {
-                if !input_active.load(Ordering::Relaxed) {
+                if !active.load(Ordering::Relaxed) {
                     return;
                 }
-                let mut engine = input_engine.lock().unwrap();
-                let interleaved: Vec<f32> = data.iter().map(|s| s.to_sample::<f32>()).collect();
-                let mut processed = vec![0.0f32; interleaved.len()];
-                engine.process_block(&interleaved, &mut processed);
-                drop(engine);
-                // compute RMS across processed samples
+
+                // Map the device's channel layout onto the engine layout, duplicating
+                // a mono input to stereo (or folding down excess channels).
+                let frames = data.len() / input_channels;
+                let mut interleaved = vec![0.0f32; frames * engine_channels];
+                for frame in 0..frames {
+                    for ch in 0..engine_channels {
+                        let in_ch = if input_channels == 1 {
+                            0
+                        } else {
+                            ch.min(input_channels - 1)
+                        };
+                        interleaved[frame * engine_channels + ch] =
+                            data[frame * input_channels + in_ch].to_sample::<f32>();
+                    }
+                }
+
+                // IN meter: RMS of the raw, pre-DSP input signal.
                 let mut sum_sq = 0.0f32;
-                for &s in processed.iter() {
+                for &s in interleaved.iter() {
                     sum_sq += s * s;
                 }
-                let rms = if processed.is_empty() { 0.0 } else { (sum_sq / processed.len() as f32).sqrt() };
+                let rms = if interleaved.is_empty() {
+                    0.0
+                } else {
+                    (sum_sq / interleaved.len() as f32).sqrt()
+                };
                 if let Ok(mut lvl) = input_level.lock() {
                     *lvl = rms.clamp(0.0, 1.0);
                 }
-                input_shared.lock().unwrap().write(&processed);
+
+                let mut processed = vec![0.0f32; interleaved.len()];
+                engine.lock().unwrap().process_block(&interleaved, &mut processed);
+                shared_out.lock().unwrap().write(&processed);
             },
             |err| tracing::error!("Input stream error: {err}"),
             None,
-        )?;
+        )
+    }
 
-        let output_shared = shared_out.clone();
-
-        let output_stream = output_device.build_output_stream::<T, _, _>(
-            output_config.config(),
+    fn build_output_stream<T>(
+        output_device: &cpal::Device,
+        output_config: &cpal::StreamConfig,
+        shared_out: Arc<Mutex<FrameRing>>,
+        active: Arc<AtomicBool>,
+        output_level: Arc<Mutex<f32>>,
+    ) -> Result<cpal::Stream, cpal::Error>
+    where
+        T: SizedSample + FromSample<f32>,
+        f32: FromSample<T>,
+    {
+        let output_channels = output_config.channels as usize;
+        output_device.build_output_stream(
+            output_config.clone(),
             move |data: &mut [T], _| {
-                let mut ring = output_shared.lock().unwrap();
-                let mut mono = vec![0.0f32; data.len()];
-                let filled_frames = ring.read(&mut mono);
-                // compute RMS on the available frames (mono contains interleaved frames)
-                let samples = filled_frames * output_channels;
-                let sum_sq: f32 = mono[..samples].iter().map(|&v| v * v).sum();
-                let rms_out = if samples == 0 { 0.0 } else { (sum_sq / samples as f32).sqrt() };
-                if let Ok(mut lvl) = output_level.lock() {
-                    *lvl = rms_out.clamp(0.0, 1.0);
+                if !active.load(Ordering::Relaxed) {
+                    for sample in data.iter_mut() {
+                        *sample = 0.0f32.to_sample::<T>();
+                    }
+                    return;
                 }
+
+                let mut buffer = vec![0.0f32; data.len()];
+                let filled_frames = shared_out.lock().unwrap().read(&mut buffer);
+                let filled_samples = filled_frames * output_channels;
+
+                // OUT meter: RMS of the processed signal actually going to the speakers.
+                let mut sum_sq = 0.0f32;
+                for &v in buffer[..filled_samples].iter() {
+                    sum_sq += v * v;
+                }
+                let rms = if filled_samples == 0 {
+                    0.0
+                } else {
+                    (sum_sq / filled_samples as f32).sqrt()
+                };
+                if let Ok(mut lvl) = output_level.lock() {
+                    *lvl = rms.clamp(0.0, 1.0);
+                }
+
                 for (i, sample) in data.iter_mut().enumerate() {
-                    *sample = if i < samples {
-                        mono[i].to_sample::<T>()
+                    *sample = if i < filled_samples {
+                        buffer[i].to_sample::<T>()
                     } else {
                         0.0f32.to_sample::<T>()
                     };
@@ -320,66 +339,209 @@ mod standalone {
             },
             |err| tracing::error!("Output stream error: {err}"),
             None,
-        )?;
-
-        input_stream.play()?;
-        output_stream.play()?;
-
-        Ok(())
+        )
     }
 
-    #[allow(clippy::type_complexity)]
-    fn run_audio(
+    fn build_input_stream_by_format(
+        input_device: &cpal::Device,
+        input_config: &cpal::StreamConfig,
+        format: cpal::SampleFormat,
+        engine: Arc<Mutex<AudioEngine>>,
+        input_channels: usize,
+        engine_channels: usize,
+        shared_out: Arc<Mutex<FrameRing>>,
+        active: Arc<AtomicBool>,
+        input_level: Arc<Mutex<f32>>,
+    ) -> Result<cpal::Stream, String> {
+        macro_rules! build_input_streams {
+            ($($format:path => $ty:ty),+ $(,)?) => {
+                match format {
+                    $(
+                        $format => build_input_stream::<$ty>(
+                            input_device,
+                            input_config,
+                            engine.clone(),
+                            input_channels,
+                            engine_channels,
+                            shared_out.clone(),
+                            active.clone(),
+                            input_level.clone(),
+                        )
+                        .map_err(|e| format!("Could not build input stream: {e}")),
+                    )+
+                    other => Err(format!("Unsupported input sample format: {other:?}")),
+                }
+            };
+        }
+        build_input_streams!(
+            cpal::SampleFormat::I8 => i8,
+            cpal::SampleFormat::I16 => i16,
+            cpal::SampleFormat::I32 => i32,
+            cpal::SampleFormat::I64 => i64,
+            cpal::SampleFormat::U8 => u8,
+            cpal::SampleFormat::U16 => u16,
+            cpal::SampleFormat::U32 => u32,
+            cpal::SampleFormat::U64 => u64,
+            cpal::SampleFormat::F32 => f32,
+            cpal::SampleFormat::F64 => f64,
+        )
+    }
+
+    fn build_output_stream_by_format(
+        output_device: &cpal::Device,
+        output_config: &cpal::StreamConfig,
+        format: cpal::SampleFormat,
+        shared_out: Arc<Mutex<FrameRing>>,
+        active: Arc<AtomicBool>,
+        output_level: Arc<Mutex<f32>>,
+    ) -> Result<cpal::Stream, String> {
+        macro_rules! build_output_streams {
+            ($($format:path => $ty:ty),+ $(,)?) => {
+                match format {
+                    $(
+                        $format => build_output_stream::<$ty>(
+                            output_device,
+                            output_config,
+                            shared_out.clone(),
+                            active.clone(),
+                            output_level.clone(),
+                        )
+                        .map_err(|e| format!("Could not build output stream: {e}")),
+                    )+
+                    other => Err(format!("Unsupported output sample format: {other:?}")),
+                }
+            };
+        }
+        build_output_streams!(
+            cpal::SampleFormat::I8 => i8,
+            cpal::SampleFormat::I16 => i16,
+            cpal::SampleFormat::I32 => i32,
+            cpal::SampleFormat::I64 => i64,
+            cpal::SampleFormat::U8 => u8,
+            cpal::SampleFormat::U16 => u16,
+            cpal::SampleFormat::U32 => u32,
+            cpal::SampleFormat::U64 => u64,
+            cpal::SampleFormat::F32 => f32,
+            cpal::SampleFormat::F64 => f64,
+        )
+    }
+
+    /// Pick an input config at the output's sample rate (preferring f32), falling
+    /// back to the device's default config if nothing matches.
+    fn pick_input_config(
+        input_device: &cpal::Device,
+        requested_rate: cpal::SampleRate,
+    ) -> Result<(cpal::StreamConfig, cpal::SampleFormat), String> {
+        let configs: Vec<_> = input_device
+            .supported_input_configs()
+            .map_err(|e| format!("Could not query input configs: {e}"))?
+            .collect();
+        let at_rate = configs
+            .iter()
+            .filter(|c| c.min_sample_rate() <= requested_rate && c.max_sample_rate() >= requested_rate)
+            .collect::<Vec<_>>();
+        let chosen = at_rate
+            .iter()
+            .find(|c| c.sample_format() == cpal::SampleFormat::F32)
+            .or_else(|| at_rate.first())
+            .copied();
+        if let Some(cfg) = chosen {
+            return Ok((cfg.with_sample_rate(requested_rate).config(), cfg.sample_format()));
+        }
+
+        tracing::warn!("No input config matches the output sample rate; using the input device default.");
+        let default = input_device
+            .default_input_config()
+            .map_err(|e| format!("Could not query default input config: {e}"))?;
+        Ok((default.config(), default.sample_format()))
+    }
+
+    /// Set up audio using the system's default input and output devices. Returns
+    /// the streams so the caller can keep them alive for the whole app lifetime.
+    fn setup_audio(
         params: Arc<PreVocalParams>,
-    ) -> Result<(Arc<AtomicBool>, Arc<Mutex<FrameRing>>, Arc<Mutex<AudioEngine>>, Arc<Mutex<f32>>, Arc<Mutex<f32>>), String> {
+    ) -> Result<
+        (
+            Vec<cpal::Stream>,
+            Arc<Mutex<AudioEngine>>,
+            Arc<AtomicBool>,
+            Arc<Mutex<f32>>,
+            Arc<Mutex<f32>>,
+            Arc<Mutex<FrameRing>>,
+        ),
+        String,
+    > {
         let host = cpal::default_host();
+        let input_device = host
+            .default_input_device()
+            .ok_or_else(|| "No default audio input device found.".to_string())?;
         let output_device = host
             .default_output_device()
             .ok_or_else(|| "No default audio output device found.".to_string())?;
-        let output_config = output_device
+
+        let output_default = output_device
             .default_output_config()
             .map_err(|e| format!("Could not query default output config: {e}"))?;
+        let sample_rate = output_default.sample_rate();
+        let output_channels = output_default.channels() as usize;
+        let output_sample_format = output_default.sample_format();
+        let output_config = output_default.config();
 
-        let sample_rate = output_config.sample_rate() as f32;
-        let num_channels = output_config.channels() as usize;
+        let (input_config, input_sample_format) = pick_input_config(&input_device, sample_rate)?;
+        let input_channels = input_config.channels as usize;
+
+        if input_channels != output_channels {
+            tracing::warn!(
+                "Input ({input_channels} ch) and output ({output_channels} ch) differ; mapping to the output layout."
+            );
+        }
 
         let engine = Arc::new(Mutex::new(AudioEngine::new(
             params,
-            sample_rate,
-            num_channels,
+            sample_rate as f32,
+            output_channels,
         )));
-        let shared_out = Arc::new(Mutex::new(FrameRing::new(8192, num_channels)));
+        let shared_out = Arc::new(Mutex::new(FrameRing::new(8192, output_channels)));
         let active = Arc::new(AtomicBool::new(true));
-        let shared_level = Arc::new(Mutex::new(0.0f32));
-        let shared_output_level = Arc::new(Mutex::new(0.0f32));
+        let input_level = Arc::new(Mutex::new(0.0f32));
+        let output_level = Arc::new(Mutex::new(0.0f32));
 
-        let slevel = shared_level.clone();
-        let soutput = shared_output_level.clone();
+        let input_stream = build_input_stream_by_format(
+            &input_device,
+            &input_config,
+            input_sample_format,
+            engine.clone(),
+            input_channels,
+            output_channels,
+            shared_out.clone(),
+            active.clone(),
+            input_level.clone(),
+        )?;
 
-        let dispatch = move |engine: Arc<Mutex<AudioEngine>>,
-                             shared_out: Arc<Mutex<FrameRing>>,
-                             active: Arc<AtomicBool>|
-              -> Result<(), cpal::Error> {
-            match output_config.sample_format() {
-                cpal::SampleFormat::F32 => run_stream::<f32>(engine, shared_out, active, slevel.clone(), soutput.clone()),
-                cpal::SampleFormat::F64 => run_stream::<f64>(engine, shared_out, active, slevel.clone(), soutput.clone()),
-                cpal::SampleFormat::I16 => run_stream::<i16>(engine, shared_out, active, slevel.clone(), soutput.clone()),
-                cpal::SampleFormat::U16 => run_stream::<u16>(engine, shared_out, active, slevel.clone(), soutput.clone()),
-                cpal::SampleFormat::I32 => run_stream::<i32>(engine, shared_out, active, slevel.clone(), soutput.clone()),
-                cpal::SampleFormat::U32 => run_stream::<u32>(engine, shared_out, active, slevel.clone(), soutput.clone()),
-                cpal::SampleFormat::I8 => run_stream::<i8>(engine, shared_out, active, slevel.clone(), soutput.clone()),
-                cpal::SampleFormat::U8 => run_stream::<u8>(engine, shared_out, active, slevel.clone(), soutput.clone()),
-                 other => Err(cpal::Error::with_message(
-                    cpal::ErrorKind::UnsupportedConfig,
-                    format!("Unsupported output sample format: {other:?}"),
-                ))
-            }
-        };
+        let output_stream = build_output_stream_by_format(
+            &output_device,
+            &output_config,
+            output_sample_format,
+            shared_out.clone(),
+            active.clone(),
+            output_level.clone(),
+        )?;
 
-        match dispatch(engine.clone(), shared_out.clone(), active.clone()) {
-            Ok(()) => Ok((active, shared_out, engine, shared_level, shared_output_level)),
-            Err(e) => Err(format!("Could not build audio streams: {e}")),
-        }
+        input_stream
+            .play()
+            .map_err(|e| format!("Could not start input stream: {e}"))?;
+        output_stream
+            .play()
+            .map_err(|e| format!("Could not start output stream: {e}"))?;
+
+        Ok((
+            vec![input_stream, output_stream],
+            engine,
+            active,
+            input_level,
+            output_level,
+            shared_out,
+        ))
     }
 
     // ---------------------------------------------------------------------
@@ -391,8 +553,8 @@ mod standalone {
         engine: Arc<Mutex<AudioEngine>>,
         shared_out: Arc<Mutex<FrameRing>>,
         active: Arc<AtomicBool>,
-        shared_level: Arc<Mutex<f32>>,
-        shared_output_level: Arc<Mutex<f32>>,
+        input_level: Arc<Mutex<f32>>,
+        output_level: Arc<Mutex<f32>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let ui = PreVocalUI::new()?;
 
@@ -417,22 +579,26 @@ mod standalone {
         let bridge_phase = Arc::clone(&bridge);
         ui.on_phase_flip_changed(move |v| bridge_phase.write_phase(v));
 
-        let _ = (&engine, &shared_out, &active);
+        let _ = (&engine, &shared_out);
 
-        // spawn a thread to poll shared_level and shared_output_level and update the UI meters
+        // Poll the level shared values and drive the UI meters with a little
+        // ballistics smoothing so they don't flicker.
         let ui_weak = ui.as_weak();
-        let level_poll = Arc::clone(&shared_level);
-        let out_level_poll = Arc::clone(&shared_output_level);
+        let input_poll = Arc::clone(&input_level);
+        let output_poll = Arc::clone(&output_level);
         let active_poll = active.clone();
         std::thread::spawn(move || {
             use std::time::Duration;
+            let mut smooth_in = 0.0f32;
+            let mut smooth_out = 0.0f32;
             while active_poll.load(Ordering::Relaxed) {
-                let lvl = *level_poll.lock().unwrap();
-                let out_lvl = *out_level_poll.lock().unwrap();
-                // update UI meter; use upgrade_in_event_loop to safely call UI methods
-                let _ = ui_weak.upgrade_in_event_loop(move |ui| ui.set_input_level(lvl));
-                let _ = ui_weak.upgrade_in_event_loop(move |ui| ui.set_output_level(out_lvl));
-                std::thread::sleep(Duration::from_millis(60));
+                let in_lvl = *input_poll.lock().unwrap();
+                let out_lvl = *output_poll.lock().unwrap();
+                smooth_in += (in_lvl - smooth_in) * 0.45;
+                smooth_out += (out_lvl - smooth_out) * 0.45;
+                let _ = ui_weak.upgrade_in_event_loop(move |ui| ui.set_input_level(smooth_in));
+                let _ = ui_weak.upgrade_in_event_loop(move |ui| ui.set_output_level(smooth_out));
+                std::thread::sleep(Duration::from_millis(40));
             }
         });
 
@@ -444,24 +610,33 @@ mod standalone {
         let params = Arc::new(PreVocalParams::default());
         let bridge = UiBridge::new(&params);
 
-        match run_audio(params) {
-            Ok((active, shared_out, engine, shared_level, shared_output_level)) => {
-                if let Err(e) = run_gui(
-                    bridge.into(),
-                    engine,
-                    shared_out,
-                    active,
-                    shared_level,
-                    shared_output_level,
-                ) {
-                    eprintln!("GUI error: {e}");
+        // The streams must stay alive while the GUI runs, otherwise cpal stops the
+        // audio as soon as they are dropped.
+        let (streams, engine, active, input_level, output_level, shared_out) =
+            match setup_audio(params) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
                 }
-            }
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }
+            };
+
+        if let Err(e) = run_gui(
+            bridge.into(),
+            engine,
+            shared_out,
+            active,
+            input_level,
+            output_level,
+        ) {
+            eprintln!("GUI error: {e}");
         }
+
+        // Explicitly stop audio before exiting.
+        for stream in &streams {
+            let _ = stream.pause();
+        }
+        drop(streams);
     }
 }
 
@@ -471,6 +646,6 @@ fn main() {
 
     #[cfg(not(feature = "standalone"))]
     {
-        eprintln!("Standalone mode is disabled. Build with `cargo run --features standalone --bin prevocal-standalone` after installing ALSA/JACK system libraries.");
+        eprintln!("Standalone mode is disabled. Build with `cargo run --features standalone --bin prevocal-standalone`.");
     }
 }
