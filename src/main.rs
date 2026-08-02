@@ -10,6 +10,7 @@
 mod standalone {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use cpal::{FromSample, Sample};
+    use nice_plug::params::InternalParamMut;
     use nice_plug::prelude::*;
     use prevocal::{PreVocalDsp, PreVocalParams};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,89 +23,84 @@ mod standalone {
     // the audio thread reads from, through raw [`ParamPtr`]s.
     // ---------------------------------------------------------------------
 
-    #[derive(Clone, Copy)]
     struct UiBridge {
-        drive: ParamPtr,
-        hpf: ParamPtr,
-        air: ParamPtr,
-        phase_flip: ParamPtr,
-        output_trim: ParamPtr,
+        params: Arc<PreVocalParams>,
     }
 
     impl UiBridge {
-        fn new(params: &PreVocalParams) -> Self {
-            let mut map: std::collections::HashMap<String, ParamPtr> = params
-                .param_map()
-                .into_iter()
-                .map(|(id, ptr, _)| (id, ptr))
-                .collect();
-
-            let take = |map: &mut std::collections::HashMap<String, ParamPtr>, id: &str| {
-                map.remove(id).unwrap_or_else(|| panic!("missing parameter `{id}`"))
-            };
-
+        fn new(params: &Arc<PreVocalParams>) -> Self {
             Self {
-                drive: take(&mut map, "drive"),
-                hpf: take(&mut map, "hpf"),
-                air: take(&mut map, "air"),
-                phase_flip: take(&mut map, "phase_flip"),
-                output_trim: take(&mut map, "output_trim"),
+                params: Arc::clone(params),
             }
         }
 
         // The UI works in dB/Hz, the params store linear gain for drive/trim.
         fn write_drive(&self, db: f32) {
+            let db = db.clamp(0.0, 24.0);
+            if !db.is_finite() {
+                return;
+            }
+            let gain = util::db_to_gain(db);
             unsafe {
-                self.drive
-                    ._internal_set_normalized_value(self.drive.preview_normalized(util::db_to_gain(db)));
+                self.params.drive._internal_set_plain_value(gain);
             }
         }
 
         fn write_hpf(&self, hz: f32) {
+            let hz = hz.clamp(20.0, 200.0);
+            if !hz.is_finite() {
+                return;
+            }
             unsafe {
-                self.hpf._internal_set_normalized_value(self.hpf.preview_normalized(hz));
+                self.params.hpf._internal_set_plain_value(hz);
             }
         }
 
         fn write_air(&self, db: f32) {
+            let db = db.clamp(0.0, 6.0);
+            if !db.is_finite() {
+                return;
+            }
             unsafe {
-                self.air._internal_set_normalized_value(self.air.preview_normalized(db));
+                self.params.air._internal_set_plain_value(db);
             }
         }
 
         fn write_phase(&self, enabled: bool) {
             unsafe {
-                self.phase_flip
-                    ._internal_set_normalized_value(if enabled { 1.0 } else { 0.0 });
+                self.params.phase_flip._internal_set_plain_value(enabled);
             }
         }
 
         fn write_output_trim(&self, db: f32) {
+            let db = db.clamp(-12.0, 12.0);
+            if !db.is_finite() {
+                return;
+            }
+            let gain = util::db_to_gain(db);
             unsafe {
-                self.output_trim._internal_set_normalized_value(
-                    self.output_trim.preview_normalized(util::db_to_gain(db)),
-                );
+                self.params.output_trim._internal_set_plain_value(gain);
             }
         }
 
         fn drive_value(&self) -> f32 {
-            unsafe { util::gain_to_db(self.drive.modulated_plain_value()) }
+            util::gain_to_db(self.params.drive.modulated_plain_value())
         }
 
         fn hpf_value(&self) -> f32 {
-            unsafe { self.hpf.modulated_plain_value() }
+            self.params.hpf.modulated_plain_value()
         }
 
         fn air_value(&self) -> f32 {
-            unsafe { self.air.modulated_plain_value() }
+            self.params.air.modulated_plain_value()
         }
 
         fn phase_value(&self) -> bool {
-            unsafe { self.phase_flip.modulated_plain_value() >= 0.5 }
+            self.params.phase_flip.modulated_plain_value()
         }
 
         fn output_trim_value(&self) -> f32 {
-            unsafe { util::gain_to_db(self.output_trim.modulated_plain_value()) }
+            util::gain_to_db(self.params.output_trim.modulated_plain_value())
         }
     }
 
@@ -368,7 +364,7 @@ mod standalone {
     // ---------------------------------------------------------------------
 
     fn run_gui(
-        bridge: UiBridge,
+        bridge: Arc<UiBridge>,
         engine: Arc<Mutex<AudioEngine>>,
         shared_out: Arc<Mutex<FrameRing>>,
         active: Arc<AtomicBool>,
@@ -381,12 +377,20 @@ mod standalone {
         ui.set_output_trim(bridge.output_trim_value());
         ui.set_phase_flip(bridge.phase_value());
 
-        let bridge = bridge;
-        ui.on_drive_changed(move |v| bridge.write_drive(v));
-        ui.on_hpf_changed(move |v| bridge.write_hpf(v));
-        ui.on_air_changed(move |v| bridge.write_air(v));
-        ui.on_output_trim_changed(move |v| bridge.write_output_trim(v));
-        ui.on_phase_flip_changed(move |v| bridge.write_phase(v));
+        let bridge_drive = Arc::clone(&bridge);
+        ui.on_drive_changed(move |v| bridge_drive.write_drive(v));
+
+        let bridge_hpf = Arc::clone(&bridge);
+        ui.on_hpf_changed(move |v| bridge_hpf.write_hpf(v));
+
+        let bridge_air = Arc::clone(&bridge);
+        ui.on_air_changed(move |v| bridge_air.write_air(v));
+
+        let bridge_trim = Arc::clone(&bridge);
+        ui.on_output_trim_changed(move |v| bridge_trim.write_output_trim(v));
+
+        let bridge_phase = Arc::clone(&bridge);
+        ui.on_phase_flip_changed(move |v| bridge_phase.write_phase(v));
 
         let _ = (engine, shared_out, active);
         ui.run()?;
@@ -399,7 +403,7 @@ mod standalone {
 
         match run_audio(params) {
             Ok((active, shared_out, engine)) => {
-                if let Err(e) = run_gui(bridge, engine, shared_out, active) {
+                if let Err(e) = run_gui(bridge.into(), engine, shared_out, active) {
                     eprintln!("GUI error: {e}");
                 }
             }

@@ -275,11 +275,11 @@ export component PreVocalUI inherits Window {
                     Text { text: "DRIVE"; font-size: 13px; color: #A0A0B0; }
                     VerticalFader {
                         minimum: 0.;
-                        maximum: 100;
+                        maximum: 24.0;
                         value <=> root.drive;
                         changed(v) => { root.drive-changed(v); }
                     }
-                    Text { text: root.drive.round() + "%"; font-size: 14px; color: #C77DFF; }
+                    Text { text: root.drive.round() + " dB"; font-size: 14px; color: #C77DFF; }
                 }
 
                 VerticalLayout {
