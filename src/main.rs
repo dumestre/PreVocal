@@ -13,10 +13,10 @@
 //!            +--> IN meter (raw input)           +--> OUT meter (processed output)
 //! ```
 //!
-//! The toolbar lets you pick the audio driver/host and device (e.g. ASIO or WASAPI),
-//! restart the engine and rescan the device list. The last selection is persisted to a
-//! small file so it is restored on the next launch. When a device only supports input
-//! (or only output), the other side falls back to the host's default device.
+//! The toolbar lets you pick the audio driver (e.g. ASIO or WASAPI) and, below it,
+//! the output and input devices of that driver independently. Restart and rescan
+//! buttons are provided, and the last selection is persisted to a small file so it
+//! is restored on the next launch.
 
 #![cfg_attr(not(feature = "standalone"), allow(dead_code))]
 
@@ -27,7 +27,7 @@ mod standalone {
     use nice_plug::params::InternalParamMut;
     use nice_plug::prelude::*;
     use prevocal::{PreVocalDsp, PreVocalParams};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
 
     slint::include_modules!();
@@ -39,12 +39,43 @@ mod standalone {
 
     struct UiBridge {
         params: Arc<PreVocalParams>,
+        /// Current audio sample rate, written by `AudioManager` on start. Needed to
+        /// re-arm the parameter smoothers after a UI edit, exactly like the
+        /// standalone wrapper in nice-plug does.
+        sample_rate: Arc<AtomicU32>,
     }
 
     impl UiBridge {
-        fn new(params: &Arc<PreVocalParams>) -> Self {
+        fn new(params: &Arc<PreVocalParams>, sample_rate: Arc<AtomicU32>) -> Self {
             Self {
                 params: Arc::clone(params),
+                sample_rate,
+            }
+        }
+
+        // The DSP smoothers only pick up a new target after
+        // `_internal_update_smoother` is called (mirrors the standalone host in
+        // nice-plug). Without this the faders/knobs would only "apply" on a stream
+        // restart, so we re-arm the smoothed params on every UI write.
+        fn update_smoothers(&self) {
+            let sample_rate = self.sample_rate.load(Ordering::Relaxed);
+            if sample_rate == 0 {
+                return;
+            }
+            let sample_rate = sample_rate as f32;
+            unsafe {
+                self.params
+                    .drive
+                    ._internal_update_smoother(sample_rate, false);
+                self.params
+                    .hpf
+                    ._internal_update_smoother(sample_rate, false);
+                self.params
+                    .air
+                    ._internal_update_smoother(sample_rate, false);
+                self.params
+                    .output_trim
+                    ._internal_update_smoother(sample_rate, false);
             }
         }
 
@@ -58,6 +89,7 @@ mod standalone {
             unsafe {
                 self.params.drive._internal_set_plain_value(gain);
             }
+            self.update_smoothers();
         }
 
         fn write_hpf(&self, hz: f32) {
@@ -68,6 +100,7 @@ mod standalone {
             unsafe {
                 self.params.hpf._internal_set_plain_value(hz);
             }
+            self.update_smoothers();
         }
 
         fn write_air(&self, db: f32) {
@@ -78,12 +111,14 @@ mod standalone {
             unsafe {
                 self.params.air._internal_set_plain_value(db);
             }
+            self.update_smoothers();
         }
 
         fn write_phase(&self, enabled: bool) {
             unsafe {
                 self.params.phase_flip._internal_set_plain_value(enabled);
             }
+            self.update_smoothers();
         }
 
         fn write_output_trim(&self, db: f32) {
@@ -95,6 +130,7 @@ mod standalone {
             unsafe {
                 self.params.output_trim._internal_set_plain_value(gain);
             }
+            self.update_smoothers();
         }
 
         fn drive_value(&self) -> f32 {
@@ -240,19 +276,24 @@ mod standalone {
     // alive and owns the cpal streams. The GUI talks to it through a Mutex.
     // ---------------------------------------------------------------------
 
-    /// A single selectable host/device pair.
+    /// A single selectable device (input or output) of a given host.
     #[derive(Clone)]
     struct DeviceEntry {
-        host_id: cpal::HostId,
         device_name: String,
         device: cpal::Device,
     }
 
     struct AudioManager {
         params: Arc<PreVocalParams>,
-        entries: Vec<DeviceEntry>,
-        labels: Vec<String>,
-        current: usize,
+        hosts: Vec<cpal::HostId>,
+        host_labels: Vec<String>,
+        host_current: usize,
+        input_devices: Vec<DeviceEntry>,
+        input_labels: Vec<String>,
+        input_current: usize,
+        output_devices: Vec<DeviceEntry>,
+        output_labels: Vec<String>,
+        output_current: usize,
         /// Gates the audio callbacks (toggled on stop/start).
         active: Arc<AtomicBool>,
         /// Keeps the meter poll thread alive for the whole app lifetime.
@@ -260,32 +301,59 @@ mod standalone {
         meters: Arc<Mutex<MeterState>>,
         streams: Option<Vec<cpal::Stream>>,
         status: String,
+        /// Shared with `UiBridge` so it can re-arm the smoothers at the right rate.
+        sample_rate: Arc<AtomicU32>,
     }
 
     impl AudioManager {
-        fn new(params: Arc<PreVocalParams>) -> Self {
-            let entries = Self::enumerate_entries();
-            let labels = Self::make_labels(&entries);
+        fn new(params: Arc<PreVocalParams>, sample_rate: Arc<AtomicU32>) -> Self {
+            let hosts = Self::enum_hosts();
+            let host_labels = Self::make_host_labels(&hosts);
             let mut mgr = Self {
                 params,
-                entries,
-                labels,
-                current: 0,
+                hosts,
+                host_labels,
+                host_current: 0,
+                input_devices: Vec::new(),
+                input_labels: Vec::new(),
+                input_current: 0,
+                output_devices: Vec::new(),
+                output_labels: Vec::new(),
+                output_current: 0,
                 active: Arc::new(AtomicBool::new(false)),
                 alive: Arc::new(AtomicBool::new(true)),
                 meters: Arc::new(Mutex::new(MeterState::default())),
                 streams: None,
                 status: String::new(),
+                sample_rate,
             };
 
-            // Restore the last used device if it's still present.
-            if let Some((host_name, device_name)) = Self::load_last_selection()
-                && let Some(idx) = mgr.entries.iter().position(|e| {
-                    e.host_id.name().eq_ignore_ascii_case(&host_name)
-                        && e.device_name.eq_ignore_ascii_case(&device_name)
-                })
+            // Restore the last used driver + input/output devices if still present.
+            let saved = Self::load_last_selection();
+            if let Some((host_name, _, _)) = &saved
+                && let Some(idx) = mgr
+                    .hosts
+                    .iter()
+                    .position(|h| h.name().eq_ignore_ascii_case(host_name))
             {
-                mgr.current = idx;
+                mgr.host_current = idx;
+            }
+            mgr.reload_devices();
+            if let Some((_, input_name, output_name)) = &saved {
+                if let Some(idx) = mgr
+                    .input_devices
+                    .iter()
+                    .position(|d| d.device_name.eq_ignore_ascii_case(input_name))
+                {
+                    mgr.input_current = idx;
+                }
+                if let Some(idx) = mgr
+                    .output_devices
+                    .iter()
+                    .position(|d| d.device_name.eq_ignore_ascii_case(output_name))
+                {
+                    mgr.output_current = idx;
+                }
             }
 
             if let Err(e) = mgr.start() {
@@ -294,70 +362,108 @@ mod standalone {
             mgr
         }
 
-        fn enumerate_entries() -> Vec<DeviceEntry> {
+        fn enum_hosts() -> Vec<cpal::HostId> {
+            cpal::available_hosts()
+        }
+
+        fn make_host_labels(hosts: &[cpal::HostId]) -> Vec<String> {
+            hosts.iter().map(|h| h.name().to_string()).collect()
+        }
+
+        fn enum_devices(host_id: cpal::HostId) -> Vec<DeviceEntry> {
             let mut entries = Vec::new();
             let mut seen = std::collections::HashSet::new();
-            for host_id in cpal::available_hosts() {
-                let Ok(host) = cpal::host_from_id(host_id) else {
-                    continue;
-                };
-                let mut add = |device: cpal::Device| {
-                    let name = device.to_string();
-                    if seen.insert((host_id, name.clone())) {
-                        entries.push(DeviceEntry {
-                            host_id,
-                            device_name: name,
-                            device,
-                        });
-                    }
-                };
-                if let Ok(devices) = host.devices() {
-                    for device in devices {
-                        add(device);
-                    }
+            let Ok(host) = cpal::host_from_id(host_id) else {
+                return entries;
+            };
+            let mut add = |device: cpal::Device| {
+                let device_name = device.to_string();
+                if seen.insert(device_name.clone()) {
+                    entries.push(DeviceEntry { device_name, device });
                 }
-                if let Some(device) = host.default_input_device() {
+            };
+            if let Ok(devices) = host.devices() {
+                for device in devices {
                     add(device);
                 }
-                if let Some(device) = host.default_output_device() {
-                    add(device);
-                }
+            }
+            if let Some(device) = host.default_input_device() {
+                add(device);
+            }
+            if let Some(device) = host.default_output_device() {
+                add(device);
             }
             entries
         }
 
-        fn make_labels(entries: &[DeviceEntry]) -> Vec<String> {
-            entries
-                .iter()
-                .map(|e| format!("{} — {}", e.host_id.name(), e.device_name))
-                .collect()
+        fn make_device_labels(entries: &[DeviceEntry]) -> Vec<String> {
+            entries.iter().map(|e| e.device_name.clone()).collect()
         }
 
-        // Persisted selection (host name + device name), stored next to the executable.
+        /// Split the selected host's devices into input- and output-capable lists.
+        fn reload_devices(&mut self) {
+            self.input_devices.clear();
+            self.input_labels.clear();
+            self.output_devices.clear();
+            self.output_labels.clear();
+            let Some(&host_id) = self.hosts.get(self.host_current) else {
+                return;
+            };
+            for entry in Self::enum_devices(host_id) {
+                if entry.device.supports_input() {
+                    self.input_devices.push(entry.clone());
+                }
+                if entry.device.supports_output() {
+                    self.output_devices.push(entry);
+                }
+            }
+            self.input_labels = Self::make_device_labels(&self.input_devices);
+            self.output_labels = Self::make_device_labels(&self.output_devices);
+            self.input_current = self
+                .input_current
+                .min(self.input_devices.len().saturating_sub(1));
+            self.output_current = self
+                .output_current
+                .min(self.output_devices.len().saturating_sub(1));
+        }
+
+        // Persisted selection (host + input + output names), stored next to the executable.
         fn settings_path() -> std::path::PathBuf {
             std::env::current_dir()
                 .unwrap_or_default()
                 .join("prevocal-last-device.txt")
         }
 
-        fn load_last_selection() -> Option<(String, String)> {
+        fn load_last_selection() -> Option<(String, String, String)> {
             let text = std::fs::read_to_string(Self::settings_path()).ok()?;
             let mut lines = text.lines();
             let host = lines.next()?.trim().to_string();
-            let device = lines.next()?.trim().to_string();
-            if host.is_empty() || device.is_empty() {
+            let input = lines.next()?.trim().to_string();
+            let output = lines.next()?.trim().to_string();
+            if host.is_empty() || input.is_empty() || output.is_empty() {
                 return None;
             }
-            Some((host, device))
+            Some((host, input, output))
         }
 
         fn save_last_selection(&self) {
-            if let Some(entry) = self.entries.get(self.current) {
-                let _ = std::fs::write(
-                    Self::settings_path(),
-                    format!("{}\n{}\n", entry.host_id.name(), entry.device_name),
-                );
-            }
+            let Some(host) = self.hosts.get(self.host_current) else {
+                return;
+            };
+            let input = self
+                .input_devices
+                .get(self.input_current)
+                .map(|d| d.device_name.as_str())
+                .unwrap_or_default();
+            let output = self
+                .output_devices
+                .get(self.output_current)
+                .map(|d| d.device_name.as_str())
+                .unwrap_or_default();
+            let _ = std::fs::write(
+                Self::settings_path(),
+                format!("{}\n{}\n{}\n", host.name(), input, output),
+            );
         }
 
         fn stop(&mut self) {
@@ -376,30 +482,33 @@ mod standalone {
         }
 
         fn try_start(&mut self) -> Result<String, String> {
-            let entry = self
-                .entries
-                .get(self.current)
-                .cloned()
-                .ok_or_else(|| "No audio device selected.".to_string())?;
-            let host = cpal::host_from_id(entry.host_id)
-                .map_err(|e| format!("Could not load host '{}': {e}", entry.host_id.name()))?;
+            let host_id = *self
+                .hosts
+                .get(self.host_current)
+                .ok_or_else(|| "No audio driver selected.".to_string())?;
+            let host = cpal::host_from_id(host_id)
+                .map_err(|e| format!("Could not load host '{}': {e}", host_id.name()))?;
 
-            // Use the selected device for whichever side it supports; fall back to the
-            // host's default for the other side (e.g. a mic-only or speaker-only device).
-            let input_device = if entry.device.supports_input() {
-                entry.device.clone()
-            } else {
-                host.default_input_device().ok_or_else(|| {
-                    format!("No input device available for host '{}'.", entry.host_id.name())
-                })?
-            };
-            let output_device = if entry.device.supports_output() {
-                entry.device.clone()
-            } else {
-                host.default_output_device().ok_or_else(|| {
-                    format!("No output device available for host '{}'.", entry.host_id.name())
-                })?
-            };
+            // The GUI picks the input and output device independently; fall back to the
+            // host defaults if a list is empty (e.g. no matching device after refresh).
+            let input_device = self
+                .input_devices
+                .get(self.input_current)
+                .map(|e| e.device.clone())
+                .or_else(|| host.default_input_device())
+                .ok_or_else(|| {
+                    format!("No input device available for host '{}'.", host_id.name())
+                })?;
+            let output_device = self
+                .output_devices
+                .get(self.output_current)
+                .map(|e| e.device.clone())
+                .or_else(|| host.default_output_device())
+                .ok_or_else(|| {
+                    format!("No output device available for host '{}'.", host_id.name())
+                })?;
+            let input_name = input_device.to_string();
+            let output_name = output_device.to_string();
 
             let output_default = output_device
                 .default_output_config()
@@ -408,6 +517,7 @@ mod standalone {
             let output_channels = output_default.channels() as usize;
             let output_sample_format = output_default.sample_format();
             let output_config = output_default.config();
+            self.sample_rate.store(sample_rate, Ordering::Relaxed);
 
             let (input_config, input_sample_format) = pick_input_config(&input_device, sample_rate)?;
             let input_channels = input_config.channels as usize;
@@ -459,50 +569,76 @@ mod standalone {
             self.save_last_selection();
 
             Ok(format!(
-                "RUNNING — {} ({} Hz, {} in / {} out ch)",
-                entry.device_name, sample_rate, input_channels, output_channels
+                "RUNNING — in: {input_name} → out: {output_name} ({} Hz, {} in / {} out ch)",
+                sample_rate, input_channels, output_channels
             ))
         }
 
-        fn select(&mut self, idx: usize) {
-            if idx >= self.entries.len() || idx == self.current {
+        fn select_host(&mut self, idx: usize) {
+            if idx >= self.hosts.len() || idx == self.host_current {
                 return;
             }
-            self.current = idx;
+            self.host_current = idx;
+            self.input_current = 0;
+            self.output_current = 0;
+            self.reload_devices();
             if let Err(e) = self.start() {
                 tracing::error!("Audio restart failed: {e}");
             }
         }
 
-        /// Select a device by its ComboBox label ("HOST — DEVICE").
-        fn select_by_label(&mut self, label: &str) {
-            if let Some(idx) = self.labels.iter().position(|l| l == label) {
-                self.select(idx);
+        fn select_input(&mut self, idx: usize) {
+            if idx >= self.input_devices.len() || idx == self.input_current {
+                return;
+            }
+            self.input_current = idx;
+            if let Err(e) = self.start() {
+                tracing::error!("Audio restart failed: {e}");
+            }
+        }
+
+        fn select_output(&mut self, idx: usize) {
+            if idx >= self.output_devices.len() || idx == self.output_current {
+                return;
+            }
+            self.output_current = idx;
+            if let Err(e) = self.start() {
+                tracing::error!("Audio restart failed: {e}");
             }
         }
 
         fn refresh(&mut self) {
-            let previous = self
-                .entries
-                .get(self.current)
-                .map(|e| (e.host_id, e.device_name.clone()));
+            let prev_host = self.hosts.get(self.host_current).copied();
+            let prev_input = self
+                .input_devices
+                .get(self.input_current)
+                .map(|d| d.device_name.clone());
+            let prev_output = self
+                .output_devices
+                .get(self.output_current)
+                .map(|d| d.device_name.clone());
             self.stop();
-            self.entries = Self::enumerate_entries();
-            self.labels = Self::make_labels(&self.entries);
-
-            if let Some((host_id, name)) = previous {
-                let found = self
-                    .entries
+            self.hosts = Self::enum_hosts();
+            self.host_labels = Self::make_host_labels(&self.hosts);
+            self.host_current = prev_host
+                .and_then(|h| self.hosts.iter().position(|x| *x == h))
+                .unwrap_or(0);
+            self.reload_devices();
+            if let Some(name) = prev_input {
+                self.input_current = self
+                    .input_devices
                     .iter()
-                    .position(|e| e.host_id == host_id && e.device_name == name)
-                    .or_else(|| self.entries.iter().position(|e| e.host_id == host_id))
+                    .position(|d| d.device_name == name)
                     .unwrap_or(0);
-                self.current = found;
-            } else {
-                self.current = 0;
             }
-
-            if self.entries.is_empty() {
+            if let Some(name) = prev_output {
+                self.output_current = self
+                    .output_devices
+                    .iter()
+                    .position(|d| d.device_name == name)
+                    .unwrap_or(0);
+            }
+            if self.input_devices.is_empty() || self.output_devices.is_empty() {
                 self.status = "ERROR: no audio devices found".to_string();
                 return;
             }
@@ -516,15 +652,16 @@ mod standalone {
             self.stop();
         }
 
-        fn device_index(&self) -> i32 {
-            self.current as i32
+        fn host_index(&self) -> i32 {
+            self.host_current as i32
         }
 
-        fn driver_name(&self) -> String {
-            self.entries
-                .get(self.current)
-                .map(|e| e.host_id.name().to_string())
-                .unwrap_or_default()
+        fn input_index(&self) -> i32 {
+            self.input_current as i32
+        }
+
+        fn output_index(&self) -> i32 {
+            self.output_current as i32
         }
 
         fn is_running(&self) -> bool {
@@ -811,6 +948,18 @@ mod standalone {
         bridge: Arc<UiBridge>,
         manager: Arc<Mutex<AudioManager>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // Push the current driver/device selection and the engine status to the UI.
+        fn sync_ui(ui: &PreVocalUI, mgr: &AudioManager) {
+            ui.set_available_hosts(string_model(&mgr.host_labels));
+            ui.set_host_index(mgr.host_index());
+            ui.set_available_inputs(string_model(&mgr.input_labels));
+            ui.set_input_index(mgr.input_index());
+            ui.set_available_outputs(string_model(&mgr.output_labels));
+            ui.set_output_index(mgr.output_index());
+            ui.set_audio_status(mgr.status().into());
+            ui.set_audio_running(mgr.is_running());
+        }
+
         ui.set_drive(bridge.drive_value());
         ui.set_hpf(bridge.hpf_value());
         ui.set_air(bridge.air_value());
@@ -819,11 +968,7 @@ mod standalone {
 
         {
             let mgr = manager.lock().unwrap();
-            ui.set_available_devices(string_model(&mgr.labels));
-            ui.set_device_index(mgr.device_index());
-            ui.set_driver_name(mgr.driver_name().into());
-            ui.set_audio_status(mgr.status().into());
-            ui.set_audio_running(mgr.is_running());
+            sync_ui(&ui, &mgr);
         }
 
         let ui_weak = ui.as_weak();
@@ -843,36 +988,57 @@ mod standalone {
         let bridge_phase = Arc::clone(&bridge);
         ui.on_phase_flip_changed(move |v| bridge_phase.write_phase(v));
 
-        // The user picked a device in the ComboBox: switch the audio engine to it.
-        let mgr_select = Arc::clone(&manager);
-        let weak_select = ui_weak.clone();
-        ui.on_device_selected(move |label: slint::SharedString| {
-            let mut mgr = mgr_select.lock().unwrap();
-            mgr.select_by_label(label.as_str());
-            if let Some(ui) = weak_select.upgrade() {
-                ui.set_device_index(mgr.device_index());
-                ui.set_driver_name(mgr.driver_name().into());
-                ui.set_audio_status(mgr.status().into());
-                ui.set_audio_running(mgr.is_running());
+        // The user picked a driver: repopulate the input/output device lists.
+        let mgr_host = Arc::clone(&manager);
+        let weak_host = ui_weak.clone();
+        ui.on_host_selected(move |label: slint::SharedString| {
+            let mut mgr = mgr_host.lock().unwrap();
+            if let Some(idx) = mgr.host_labels.iter().position(|l| l == label.as_str()) {
+                mgr.select_host(idx);
+            }
+            if let Some(ui) = weak_host.upgrade() {
+                sync_ui(&ui, &mgr);
             }
         });
 
-        // Rescan the host/device lists (e.g. after plugging in an interface).
+        // The user picked an input device.
+        let mgr_input = Arc::clone(&manager);
+        let weak_input = ui_weak.clone();
+        ui.on_input_selected(move |label: slint::SharedString| {
+            let mut mgr = mgr_input.lock().unwrap();
+            if let Some(idx) = mgr.input_labels.iter().position(|l| l == label.as_str()) {
+                mgr.select_input(idx);
+            }
+            if let Some(ui) = weak_input.upgrade() {
+                sync_ui(&ui, &mgr);
+            }
+        });
+
+        // The user picked an output device.
+        let mgr_output = Arc::clone(&manager);
+        let weak_output = ui_weak.clone();
+        ui.on_output_selected(move |label: slint::SharedString| {
+            let mut mgr = mgr_output.lock().unwrap();
+            if let Some(idx) = mgr.output_labels.iter().position(|l| l == label.as_str()) {
+                mgr.select_output(idx);
+            }
+            if let Some(ui) = weak_output.upgrade() {
+                sync_ui(&ui, &mgr);
+            }
+        });
+
+        // Rescan the driver/device lists (e.g. after plugging in an interface).
         let mgr_refresh = Arc::clone(&manager);
         let weak_refresh = ui_weak.clone();
         ui.on_refresh_clicked(move || {
             let mut mgr = mgr_refresh.lock().unwrap();
             mgr.refresh();
             if let Some(ui) = weak_refresh.upgrade() {
-                ui.set_available_devices(string_model(&mgr.labels));
-                ui.set_device_index(mgr.device_index());
-                ui.set_driver_name(mgr.driver_name().into());
-                ui.set_audio_status(mgr.status().into());
-                ui.set_audio_running(mgr.is_running());
+                sync_ui(&ui, &mgr);
             }
         });
 
-        // Force a restart with the currently selected device (applies after errors).
+        // Force a restart with the current selection (applies after errors).
         let mgr_restart = Arc::clone(&manager);
         let weak_restart = ui_weak.clone();
         ui.on_restart_clicked(move || {
@@ -881,10 +1047,7 @@ mod standalone {
                 tracing::error!("Audio restart failed: {e}");
             }
             if let Some(ui) = weak_restart.upgrade() {
-                ui.set_device_index(mgr.device_index());
-                ui.set_driver_name(mgr.driver_name().into());
-                ui.set_audio_status(mgr.status().into());
-                ui.set_audio_running(mgr.is_running());
+                sync_ui(&ui, &mgr);
             }
         });
 
@@ -927,11 +1090,12 @@ mod standalone {
 
     pub fn run() {
         let params = Arc::new(PreVocalParams::default());
-        let bridge = UiBridge::new(&params);
+        let sample_rate = Arc::new(AtomicU32::new(0));
+        let bridge = UiBridge::new(&params, sample_rate.clone());
 
         // The manager owns the cpal streams, which must stay alive while the GUI
         // runs, otherwise cpal stops the audio as soon as they are dropped.
-        let manager = Arc::new(Mutex::new(AudioManager::new(params)));
+        let manager = Arc::new(Mutex::new(AudioManager::new(params, sample_rate)));
 
         let ui = match PreVocalUI::new() {
             Ok(ui) => ui,

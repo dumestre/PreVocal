@@ -264,9 +264,12 @@ export component PreVocalUI inherits Window {
     in-out property <float> output-level: 0.0;
     in-out property <float> input-peak: 0.0;
     in-out property <float> output-peak: 0.0;
-    in-out property <[string]> available-devices: [];
-    in-out property <int> device-index: -1;
-    in-out property <string> driver-name: "";
+    in-out property <[string]> available-hosts: [];
+    in-out property <int> host-index: -1;
+    in-out property <[string]> available-inputs: [];
+    in-out property <int> input-index: -1;
+    in-out property <[string]> available-outputs: [];
+    in-out property <int> output-index: -1;
     in-out property <string> audio-status: "";
     in-out property <bool> audio-running: false;
 
@@ -275,7 +278,9 @@ export component PreVocalUI inherits Window {
     callback air-changed(float);
     callback output-trim-changed(float);
     callback phase-flip-changed(bool);
-    callback device-selected(string);
+    callback host-selected(string);
+    callback input-selected(string);
+    callback output-selected(string);
     callback restart-clicked();
     callback refresh-clicked();
 
@@ -336,98 +341,141 @@ export component PreVocalUI inherits Window {
     
     
 
-        // Audio device / driver selector
+        // Audio driver / device selector
         Rectangle {
             border-radius: 14px;
             background: #1E1E24;
             border-width: 1px;
             border-color: rgba(157, 78, 221, 0.14);
 
-            HorizontalLayout {
+            VerticalLayout {
                 padding-left: 18px;
                 padding-right: 18px;
-                padding-top: 10px;
-                padding-bottom: 10px;
-                spacing: 12px;
-                alignment: LayoutAlignment.start;
-                cross-axis-alignment: center;
+                padding-top: 12px;
+                padding-bottom: 12px;
+                spacing: 10px;
 
-                Text {
-                    text: "AUDIO";
-                    font-size: 12px;
-                    color: #A0A0B0;
-                    vertical-alignment: center;
-                }
-                ComboBox {
-                    min-width: 320px;
-                    model: root.available-devices;
-                    current-index: root.device-index;
-                    selected(v) => {
-                        root.device-selected(v);
-                    }
-                }
-                Text {
-                    text: root.driver-name;
-                    font-size: 12px;
-                    color: #C77DFF;
-                    vertical-alignment: center;
-                }
-                Rectangle {
-                    width: 1px;
-                    height: 26px;
-                    background: #3C096C;
-                }
-                Text {
-                    text: root.audio-status;
-                    font-size: 12px;
-                    color: root.audio-running ? #4CAF50 : (root.audio-status == "" ? #A0A0B0 : #EF5350);
-                    vertical-alignment: center;
-                }
-                Rectangle {
-                    horizontal-stretch: 1;
-                    background: transparent;
-                }
-                // Refresh device list
-                Rectangle {
-                    width: 30px;
-                    height: 30px;
-                    border-radius: 15px;
-                    background: ta_refresh.pressed ? #3C096C : #121214;
-                    border-width: 1px;
-                    border-color: #3C096C;
+                // Row 1: driver (ASIO, WASAPI, ...)
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: LayoutAlignment.start;
+                    cross-axis-alignment: center;
+
                     Text {
-                        text: "↻";
-                        font-size: 16px;
-                        color: #C77DFF;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                    ta_refresh := TouchArea {
-                        width: parent.width;
-                        height: parent.height;
-                        clicked => { root.refresh-clicked(); }
-                    }
-                }
-                // Restart audio engine (applies selected device)
-                Rectangle {
-                    width: 90px;
-                    height: 30px;
-                    border-radius: 15px;
-                    background: ta_restart.pressed ? #3C096C : #121214;
-                    border-width: 1px;
-                    border-color: #9D4EDD;
-                    Text {
-                        text: "RESTART";
+                        text: "DRIVER";
                         font-size: 12px;
-                        font-weight: 600;
-                        color: #C77DFF;
-                        horizontal-alignment: center;
+                        color: #A0A0B0;
                         vertical-alignment: center;
                     }
-                    ta_restart := TouchArea {
-                        width: parent.width;
-                        height: parent.height;
-                        clicked => { root.restart-clicked(); }
+                    ComboBox {
+                        min-width: 220px;
+                        model: root.available-hosts;
+                        current-index: root.host-index;
+                        selected(v) => {
+                            root.host-selected(v);
+                        }
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        background: transparent;
+                    }
+                    Rectangle {
+                        width: 1px;
+                        height: 26px;
+                        background: #3C096C;
+                    }
+                    Text {
+                        text: root.audio-status;
+                        font-size: 12px;
+                        color: root.audio-running ? #4CAF50 : (root.audio-status == "" ? #A0A0B0 : #EF5350);
+                        vertical-alignment: center;
+                    }
+                    // Refresh device list
+                    Rectangle {
+                        width: 30px;
+                        height: 30px;
+                        border-radius: 15px;
+                        background: ta_refresh.pressed ? #3C096C : #121214;
+                        border-width: 1px;
+                        border-color: #3C096C;
+                        Text {
+                            text: "↻";
+                            font-size: 16px;
+                            color: #C77DFF;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        ta_refresh := TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                            clicked => { root.refresh-clicked(); }
+                        }
+                    }
+                    // Restart audio engine (applies selected devices)
+                    Rectangle {
+                        width: 90px;
+                        height: 30px;
+                        border-radius: 15px;
+                        background: ta_restart.pressed ? #3C096C : #121214;
+                        border-width: 1px;
+                        border-color: #9D4EDD;
+                        Text {
+                            text: "RESTART";
+                            font-size: 12px;
+                            font-weight: 600;
+                            color: #C77DFF;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        ta_restart := TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                            clicked => { root.restart-clicked(); }
+                        }
+                    }
+                }
+
+                // Row 2: output + input devices of the selected driver
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: LayoutAlignment.start;
+                    cross-axis-alignment: center;
+
+                    Text {
+                        text: "SAÍDA";
+                        font-size: 12px;
+                        color: #A0A0B0;
+                        vertical-alignment: center;
+                    }
+                    ComboBox {
+                        min-width: 300px;
+                        model: root.available-outputs;
+                        current-index: root.output-index;
+                        selected(v) => {
+                            root.output-selected(v);
+                        }
+                    }
+                    Rectangle {
+                        width: 12px;
+                        background: transparent;
+                    }
+                    Text {
+                        text: "ENTRADA";
+                        font-size: 12px;
+                        color: #A0A0B0;
+                        vertical-alignment: center;
+                    }
+                    ComboBox {
+                        min-width: 300px;
+                        model: root.available-inputs;
+                        current-index: root.input-index;
+                        selected(v) => {
+                            root.input-selected(v);
+                        }
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        background: transparent;
                     }
                 }
             }
