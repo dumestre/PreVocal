@@ -222,6 +222,13 @@ impl BiquadState {
     }
 }
 
+/// Per-channel filter state grouping the HPF and Air high-shelf biquads.
+#[derive(Clone, Copy, Default)]
+pub struct ChannelFilter {
+    pub hpf: BiquadState,
+    pub air: BiquadState,
+}
+
 /// Coefficients for a 2nd order Butterworth high-pass (12 dB/oct), derived from an
 /// RBJ audio EQ cookbook bilinear transform.
 pub fn butterworth_2p_highpass_coeffs(freq: f32, sample_rate: f32) -> BiquadCoeffs {
@@ -245,23 +252,52 @@ pub fn butterworth_2p_highpass_coeffs(freq: f32, sample_rate: f32) -> BiquadCoef
     }
 }
 
+/// Coefficients for a 2nd-order high-shelf filter (12 dB/octave) using the
+/// RBJ audio EQ cookbook formulas. `db_gain` is the boost/cut in dB at and
+/// above the corner frequency `freq`. A Butterworth-style Q (1/√2) is used.
+pub fn highshelf_2p_coeffs(freq: f32, db_gain: f32, sample_rate: f32) -> BiquadCoeffs {
+    let a = 10.0_f32.powf(db_gain / 40.0);
+    let omega = 2.0 * std::f32::consts::PI * freq / sample_rate;
+    let sin_omega = omega.sin();
+    let cos_omega = omega.cos();
+    let alpha = sin_omega / (2.0 * 2.0_f32.sqrt());
+    let sqrt_a = a.sqrt();
+
+    let b0 = a * ((a + 1.0) - (a - 1.0) * cos_omega + 2.0 * sqrt_a * alpha);
+    let b1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cos_omega);
+    let b2 = a * ((a + 1.0) - (a - 1.0) * cos_omega - 2.0 * sqrt_a * alpha);
+    let a0 = (a + 1.0) + (a - 1.0) * cos_omega + 2.0 * sqrt_a * alpha;
+    let a1 = -2.0 * ((a - 1.0) + (a + 1.0) * cos_omega);
+    let a2 = (a + 1.0) - (a - 1.0) * cos_omega - 2.0 * sqrt_a * alpha;
+
+    BiquadCoeffs {
+        b0: b0 / a0,
+        b1: b1 / a0,
+        b2: b2 / a0,
+        a1: a1 / a0,
+        a2: a2 / a0,
+    }
+}
+
 /// Process a single sample through the complete PreVocal chain:
 ///
-/// `input -> Drive (tanh) -> Air (high shelf gain) -> HPF -> Output Trim -> Phase Flip`
+/// `input -> Drive (tanh) -> HPF -> Air (high-shelf) -> Output Trim -> Phase Flip`
+#[allow(clippy::too_many_arguments)]
 pub fn process_sample(
     input: f32,
     drive: f32,
-    air_gain: f32,
     phase_invert: bool,
     trim: f32,
     hpf: &BiquadCoeffs,
-    state: &mut BiquadState,
+    hpf_state: &mut BiquadState,
+    air: &BiquadCoeffs,
+    air_state: &mut BiquadState,
 ) -> f32 {
     let mut x = input * drive;
     x = x.tanh();
-    x *= air_gain;
-    let y = state.process(x, hpf);
-    let mut out = y * trim;
+    let y = hpf_state.process(x, hpf);
+    let z = air_state.process(y, air);
+    let mut out = z * trim;
     if phase_invert {
         out = -out;
     }
@@ -273,7 +309,7 @@ pub fn process_sample(
 pub struct PreVocalDsp {
     params: Arc<PreVocalParams>,
     sample_rate: f32,
-    filter_states: Vec<BiquadState>,
+    filter_states: Vec<ChannelFilter>,
 }
 
 impl PreVocalDsp {
@@ -300,7 +336,7 @@ impl PreVocalDsp {
 
     /// Allocate filter state for each audio channel.
     pub fn resize(&mut self, num_channels: usize) {
-        self.filter_states.resize(num_channels, BiquadState::default());
+        self.filter_states.resize(num_channels, ChannelFilter::default());
     }
 
     /// Process one block of audio across all channels. Parameters are read from the shared
@@ -308,17 +344,28 @@ impl PreVocalDsp {
     pub fn process_block(&mut self, channels: &mut [&mut [f32]]) {
         let drive = self.params.drive.smoothed.next();
         let hpf_freq = self.params.hpf.smoothed.next();
-        let air_gain = util::db_to_gain(self.params.air.smoothed.next());
+        let air_db = self.params.air.smoothed.next();
         let phase_invert = self.params.phase_flip.modulated_plain_value();
         let trim = self.params.output_trim.smoothed.next();
         let hpf_coeffs = butterworth_2p_highpass_coeffs(hpf_freq, self.sample_rate);
+        let air_coeffs = highshelf_2p_coeffs(10_000.0, air_db, self.sample_rate);
 
         for (channel, samples) in channels.iter_mut().enumerate() {
-            let mut state = self.filter_states[channel];
+            let mut hpf = self.filter_states[channel].hpf;
+            let mut air = self.filter_states[channel].air;
             for sample in samples.iter_mut() {
-                *sample = process_sample(*sample, drive, air_gain, phase_invert, trim, &hpf_coeffs, &mut state);
+                *sample = process_sample(
+                    *sample,
+                    drive,
+                    phase_invert,
+                    trim,
+                    &hpf_coeffs,
+                    &mut hpf,
+                    &air_coeffs,
+                    &mut air,
+                );
             }
-            self.filter_states[channel] = state;
+            self.filter_states[channel] = ChannelFilter { hpf, air };
         }
     }
 }

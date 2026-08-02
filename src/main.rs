@@ -304,19 +304,14 @@ mod standalone {
                 let mut mono = vec![0.0f32; data.len()];
                 let filled_frames = ring.read(&mut mono);
                 // compute RMS on the available frames (mono contains interleaved frames)
-                let mut sum_sq = 0.0f32;
                 let samples = filled_frames * output_channels;
-                for s in 0..samples {
-                    let v = mono[s];
-                    sum_sq += v * v;
-                }
+                let sum_sq: f32 = mono[..samples].iter().map(|&v| v * v).sum();
                 let rms_out = if samples == 0 { 0.0 } else { (sum_sq / samples as f32).sqrt() };
                 if let Ok(mut lvl) = output_level.lock() {
                     *lvl = rms_out.clamp(0.0, 1.0);
                 }
-                let filled = samples;
                 for (i, sample) in data.iter_mut().enumerate() {
-                    *sample = if i < filled {
+                    *sample = if i < samples {
                         mono[i].to_sample::<T>()
                     } else {
                         0.0f32.to_sample::<T>()
@@ -333,6 +328,7 @@ mod standalone {
         Ok(())
     }
 
+    #[allow(clippy::type_complexity)]
     fn run_audio(
         params: Arc<PreVocalParams>,
     ) -> Result<(Arc<AtomicBool>, Arc<Mutex<FrameRing>>, Arc<Mutex<AudioEngine>>, Arc<Mutex<f32>>, Arc<Mutex<f32>>), String> {
@@ -357,25 +353,26 @@ mod standalone {
         let shared_level = Arc::new(Mutex::new(0.0f32));
         let shared_output_level = Arc::new(Mutex::new(0.0f32));
 
+        let slevel = shared_level.clone();
+        let soutput = shared_output_level.clone();
+
         let dispatch = move |engine: Arc<Mutex<AudioEngine>>,
                              shared_out: Arc<Mutex<FrameRing>>,
                              active: Arc<AtomicBool>|
               -> Result<(), cpal::Error> {
             match output_config.sample_format() {
-                cpal::SampleFormat::F32 => run_stream::<f32>(engine, shared_out, active, shared_level.clone(), shared_output_level.clone()),
-                cpal::SampleFormat::F64 => run_stream::<f64>(engine, shared_out, active, shared_level.clone(), shared_output_level.clone()),
-                cpal::SampleFormat::I16 => run_stream::<i16>(engine, shared_out, active, shared_level.clone(), shared_output_level.clone()),
-                cpal::SampleFormat::U16 => run_stream::<u16>(engine, shared_out, active, shared_level.clone(), shared_output_level.clone()),
-                cpal::SampleFormat::I32 => run_stream::<i32>(engine, shared_out, active, shared_level.clone(), shared_output_level.clone()),
-                cpal::SampleFormat::U32 => run_stream::<u32>(engine, shared_out, active, shared_level.clone(), shared_output_level.clone()),
-                cpal::SampleFormat::I8 => run_stream::<i8>(engine, shared_out, active, shared_level.clone(), shared_output_level.clone()),
-                cpal::SampleFormat::U8 => run_stream::<u8>(engine, shared_out, active, shared_level.clone(), shared_output_level.clone()),
-                other => {
-                    return Err(cpal::Error::with_message(
-                        cpal::ErrorKind::UnsupportedConfig,
-                        format!("Unsupported output sample format: {other:?}"),
-                    ))
-                }
+                cpal::SampleFormat::F32 => run_stream::<f32>(engine, shared_out, active, slevel.clone(), soutput.clone()),
+                cpal::SampleFormat::F64 => run_stream::<f64>(engine, shared_out, active, slevel.clone(), soutput.clone()),
+                cpal::SampleFormat::I16 => run_stream::<i16>(engine, shared_out, active, slevel.clone(), soutput.clone()),
+                cpal::SampleFormat::U16 => run_stream::<u16>(engine, shared_out, active, slevel.clone(), soutput.clone()),
+                cpal::SampleFormat::I32 => run_stream::<i32>(engine, shared_out, active, slevel.clone(), soutput.clone()),
+                cpal::SampleFormat::U32 => run_stream::<u32>(engine, shared_out, active, slevel.clone(), soutput.clone()),
+                cpal::SampleFormat::I8 => run_stream::<i8>(engine, shared_out, active, slevel.clone(), soutput.clone()),
+                cpal::SampleFormat::U8 => run_stream::<u8>(engine, shared_out, active, slevel.clone(), soutput.clone()),
+                 other => Err(cpal::Error::with_message(
+                    cpal::ErrorKind::UnsupportedConfig,
+                    format!("Unsupported output sample format: {other:?}"),
+                ))
             }
         };
 
@@ -420,7 +417,7 @@ mod standalone {
         let bridge_phase = Arc::clone(&bridge);
         ui.on_phase_flip_changed(move |v| bridge_phase.write_phase(v));
 
-        let _ = (engine, shared_out, active);
+        let _ = (&engine, &shared_out, &active);
 
         // spawn a thread to poll shared_level and shared_output_level and update the UI meters
         let ui_weak = ui.as_weak();
@@ -432,9 +429,9 @@ mod standalone {
             while active_poll.load(Ordering::Relaxed) {
                 let lvl = *level_poll.lock().unwrap();
                 let out_lvl = *out_level_poll.lock().unwrap();
-                // update UI meter; Slint weak handle will ignore if UI closed
-                ui_weak.set_input_level(lvl);
-                ui_weak.set_output_level(out_lvl);
+                // update UI meter; use upgrade_in_event_loop to safely call UI methods
+                let _ = ui_weak.upgrade_in_event_loop(move |ui| ui.set_input_level(lvl));
+                let _ = ui_weak.upgrade_in_event_loop(move |ui| ui.set_output_level(out_lvl));
                 std::thread::sleep(Duration::from_millis(60));
             }
         });

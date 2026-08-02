@@ -24,7 +24,6 @@ standalone = ["nice-plug/standalone", "nice-plug/vst3", "nice-plug/tracing-subsc
 nice-plug = { git = "https://codeberg.org/RustAudio/nice-plug", tag = "v0.2.3", default-features = false }
 slint = "1.17.1"
 cpal = { version = "0.18", optional = true }
-parking_lot = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "smallvec"] }
 
