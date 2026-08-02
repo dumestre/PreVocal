@@ -33,6 +33,9 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 [build-dependencies]
 slint-build = "1.17.1"
 
+[dev-dependencies]
+asio-sys = "0.3"
+
 [profile.dev]
 opt-level = 1
 

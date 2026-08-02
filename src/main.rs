@@ -276,18 +276,37 @@ mod standalone {
     // alive and owns the cpal streams. The GUI talks to it through a Mutex.
     // ---------------------------------------------------------------------
 
-    /// A single selectable device (input or output) of a given host.
+    /// A single selectable device (input or output) of a given driver.
     #[derive(Clone)]
     struct DeviceEntry {
         device_name: String,
         device: cpal::Device,
     }
 
+    /// A selectable driver in the toolbar. ASIO hosts expose one driver per device
+    /// (e.g. "Steinberg built-in ASIO Driver"), so each becomes its own entry; other
+    /// hosts (WASAPI) map to a single entry covering all of their devices.
+    #[derive(Clone)]
+    struct DriverEntry {
+        host_id: cpal::HostId,
+        /// For the ASIO host, the specific ASIO driver name; `None` for other hosts.
+        asio_driver: Option<String>,
+    }
+
+    impl DriverEntry {
+        fn label(&self) -> String {
+            match &self.asio_driver {
+                Some(name) => format!("{} — {name}", self.host_id.name()),
+                None => self.host_id.name().to_string(),
+            }
+        }
+    }
+
     struct AudioManager {
         params: Arc<PreVocalParams>,
-        hosts: Vec<cpal::HostId>,
-        host_labels: Vec<String>,
-        host_current: usize,
+        drivers: Vec<DriverEntry>,
+        driver_labels: Vec<String>,
+        driver_current: usize,
         input_devices: Vec<DeviceEntry>,
         input_labels: Vec<String>,
         input_current: usize,
@@ -307,13 +326,13 @@ mod standalone {
 
     impl AudioManager {
         fn new(params: Arc<PreVocalParams>, sample_rate: Arc<AtomicU32>) -> Self {
-            let hosts = Self::enum_hosts();
-            let host_labels = Self::make_host_labels(&hosts);
+            let drivers = Self::enum_drivers();
+            let driver_labels = Self::make_driver_labels(&drivers);
             let mut mgr = Self {
                 params,
-                hosts,
-                host_labels,
-                host_current: 0,
+                drivers,
+                driver_labels,
+                driver_current: 0,
                 input_devices: Vec::new(),
                 input_labels: Vec::new(),
                 input_current: 0,
@@ -330,16 +349,19 @@ mod standalone {
 
             // Restore the last used driver + input/output devices if still present.
             let saved = Self::load_last_selection();
-            if let Some((host_name, _, _)) = &saved
-                && let Some(idx) = mgr
-                    .hosts
-                    .iter()
-                    .position(|h| h.name().eq_ignore_ascii_case(host_name))
+            if let Some((host_name, asio_name, _, _)) = &saved
+                && let Some(idx) = mgr.drivers.iter().position(|d| {
+                    d.host_id.name().eq_ignore_ascii_case(host_name)
+                        && d.asio_driver
+                            .as_deref()
+                            .map(|n| n.eq_ignore_ascii_case(asio_name))
+                            .unwrap_or_else(|| asio_name.is_empty())
+                })
             {
-                mgr.host_current = idx;
+                mgr.driver_current = idx;
             }
             mgr.reload_devices();
-            if let Some((_, input_name, output_name)) = &saved {
+            if let Some((_, _, input_name, output_name)) = &saved {
                 if let Some(idx) = mgr
                     .input_devices
                     .iter()
@@ -362,12 +384,37 @@ mod standalone {
             mgr
         }
 
-        fn enum_hosts() -> Vec<cpal::HostId> {
-            cpal::available_hosts()
+        /// Enumerate the selectable drivers. ASIO contributes one entry per driver;
+        /// every other host contributes a single entry.
+        fn enum_drivers() -> Vec<DriverEntry> {
+            let mut drivers = Vec::new();
+            for host_id in cpal::available_hosts() {
+                let is_asio = host_id == cpal::HostId::Asio;
+                if is_asio {
+                    let Ok(host) = cpal::host_from_id(host_id) else {
+                        continue;
+                    };
+                    let Ok(devices) = host.devices() else {
+                        continue;
+                    };
+                    for device in devices {
+                        drivers.push(DriverEntry {
+                            host_id,
+                            asio_driver: Some(device.to_string()),
+                        });
+                    }
+                } else {
+                    drivers.push(DriverEntry {
+                        host_id,
+                        asio_driver: None,
+                    });
+                }
+            }
+            drivers
         }
 
-        fn make_host_labels(hosts: &[cpal::HostId]) -> Vec<String> {
-            hosts.iter().map(|h| h.name().to_string()).collect()
+        fn make_driver_labels(drivers: &[DriverEntry]) -> Vec<String> {
+            drivers.iter().map(DriverEntry::label).collect()
         }
 
         fn enum_devices(host_id: cpal::HostId) -> Vec<DeviceEntry> {
@@ -400,16 +447,25 @@ mod standalone {
             entries.iter().map(|e| e.device_name.clone()).collect()
         }
 
-        /// Split the selected host's devices into input- and output-capable lists.
+        /// Split the selected driver's devices into input- and output-capable lists.
         fn reload_devices(&mut self) {
             self.input_devices.clear();
             self.input_labels.clear();
             self.output_devices.clear();
             self.output_labels.clear();
-            let Some(&host_id) = self.hosts.get(self.host_current) else {
+            let Some(driver) = self.drivers.get(self.driver_current) else {
                 return;
             };
-            for entry in Self::enum_devices(host_id) {
+            let all = Self::enum_devices(driver.host_id);
+            // For an ASIO driver entry, only that specific driver's device is relevant.
+            let devices: Vec<DeviceEntry> = match &driver.asio_driver {
+                Some(name) => all
+                    .into_iter()
+                    .filter(|e| e.device_name == *name)
+                    .collect(),
+                None => all,
+            };
+            for entry in devices {
                 if entry.device.supports_input() {
                     self.input_devices.push(entry.clone());
                 }
@@ -427,27 +483,29 @@ mod standalone {
                 .min(self.output_devices.len().saturating_sub(1));
         }
 
-        // Persisted selection (host + input + output names), stored next to the executable.
+        // Persisted selection (host + ASIO driver + input + output names), stored next
+        // to the executable.
         fn settings_path() -> std::path::PathBuf {
             std::env::current_dir()
                 .unwrap_or_default()
                 .join("prevocal-last-device.txt")
         }
 
-        fn load_last_selection() -> Option<(String, String, String)> {
+        fn load_last_selection() -> Option<(String, String, String, String)> {
             let text = std::fs::read_to_string(Self::settings_path()).ok()?;
             let mut lines = text.lines();
             let host = lines.next()?.trim().to_string();
+            let asio = lines.next()?.trim().to_string();
             let input = lines.next()?.trim().to_string();
             let output = lines.next()?.trim().to_string();
             if host.is_empty() || input.is_empty() || output.is_empty() {
                 return None;
             }
-            Some((host, input, output))
+            Some((host, asio, input, output))
         }
 
         fn save_last_selection(&self) {
-            let Some(host) = self.hosts.get(self.host_current) else {
+            let Some(driver) = self.drivers.get(self.driver_current) else {
                 return;
             };
             let input = self
@@ -462,7 +520,13 @@ mod standalone {
                 .unwrap_or_default();
             let _ = std::fs::write(
                 Self::settings_path(),
-                format!("{}\n{}\n{}\n", host.name(), input, output),
+                format!(
+                    "{}\n{}\n{}\n{}\n",
+                    driver.host_id.name(),
+                    driver.asio_driver.as_deref().unwrap_or_default(),
+                    input,
+                    output
+                ),
             );
         }
 
@@ -482,10 +546,12 @@ mod standalone {
         }
 
         fn try_start(&mut self) -> Result<String, String> {
-            let host_id = *self
-                .hosts
-                .get(self.host_current)
+            let driver = self
+                .drivers
+                .get(self.driver_current)
+                .cloned()
                 .ok_or_else(|| "No audio driver selected.".to_string())?;
+            let host_id = driver.host_id;
             let host = cpal::host_from_id(host_id)
                 .map_err(|e| format!("Could not load host '{}': {e}", host_id.name()))?;
 
@@ -574,11 +640,11 @@ mod standalone {
             ))
         }
 
-        fn select_host(&mut self, idx: usize) {
-            if idx >= self.hosts.len() || idx == self.host_current {
+        fn select_driver(&mut self, idx: usize) {
+            if idx >= self.drivers.len() || idx == self.driver_current {
                 return;
             }
-            self.host_current = idx;
+            self.driver_current = idx;
             self.input_current = 0;
             self.output_current = 0;
             self.reload_devices();
@@ -608,7 +674,7 @@ mod standalone {
         }
 
         fn refresh(&mut self) {
-            let prev_host = self.hosts.get(self.host_current).copied();
+            let prev_driver = self.drivers.get(self.driver_current).cloned();
             let prev_input = self
                 .input_devices
                 .get(self.input_current)
@@ -618,10 +684,11 @@ mod standalone {
                 .get(self.output_current)
                 .map(|d| d.device_name.clone());
             self.stop();
-            self.hosts = Self::enum_hosts();
-            self.host_labels = Self::make_host_labels(&self.hosts);
-            self.host_current = prev_host
-                .and_then(|h| self.hosts.iter().position(|x| *x == h))
+            self.drivers = Self::enum_drivers();
+            self.driver_labels = Self::make_driver_labels(&self.drivers);
+            self.driver_current = prev_driver
+                .as_ref()
+                .and_then(|d| self.drivers.iter().position(|x| x.label() == d.label()))
                 .unwrap_or(0);
             self.reload_devices();
             if let Some(name) = prev_input {
@@ -652,8 +719,8 @@ mod standalone {
             self.stop();
         }
 
-        fn host_index(&self) -> i32 {
-            self.host_current as i32
+        fn driver_index(&self) -> i32 {
+            self.driver_current as i32
         }
 
         fn input_index(&self) -> i32 {
@@ -950,8 +1017,8 @@ mod standalone {
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Push the current driver/device selection and the engine status to the UI.
         fn sync_ui(ui: &PreVocalUI, mgr: &AudioManager) {
-            ui.set_available_hosts(string_model(&mgr.host_labels));
-            ui.set_host_index(mgr.host_index());
+            ui.set_available_drivers(string_model(&mgr.driver_labels));
+            ui.set_driver_index(mgr.driver_index());
             ui.set_available_inputs(string_model(&mgr.input_labels));
             ui.set_input_index(mgr.input_index());
             ui.set_available_outputs(string_model(&mgr.output_labels));
@@ -989,14 +1056,14 @@ mod standalone {
         ui.on_phase_flip_changed(move |v| bridge_phase.write_phase(v));
 
         // The user picked a driver: repopulate the input/output device lists.
-        let mgr_host = Arc::clone(&manager);
-        let weak_host = ui_weak.clone();
-        ui.on_host_selected(move |label: slint::SharedString| {
-            let mut mgr = mgr_host.lock().unwrap();
-            if let Some(idx) = mgr.host_labels.iter().position(|l| l == label.as_str()) {
-                mgr.select_host(idx);
+        let mgr_driver = Arc::clone(&manager);
+        let weak_driver = ui_weak.clone();
+        ui.on_driver_selected(move |label: slint::SharedString| {
+            let mut mgr = mgr_driver.lock().unwrap();
+            if let Some(idx) = mgr.driver_labels.iter().position(|l| l == label.as_str()) {
+                mgr.select_driver(idx);
             }
-            if let Some(ui) = weak_host.upgrade() {
+            if let Some(ui) = weak_driver.upgrade() {
                 sync_ui(&ui, &mgr);
             }
         });

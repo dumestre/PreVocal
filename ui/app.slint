@@ -264,8 +264,8 @@ export component PreVocalUI inherits Window {
     in-out property <float> output-level: 0.0;
     in-out property <float> input-peak: 0.0;
     in-out property <float> output-peak: 0.0;
-    in-out property <[string]> available-hosts: [];
-    in-out property <int> host-index: -1;
+    in-out property <[string]> available-drivers: [];
+    in-out property <int> driver-index: -1;
     in-out property <[string]> available-inputs: [];
     in-out property <int> input-index: -1;
     in-out property <[string]> available-outputs: [];
@@ -278,7 +278,7 @@ export component PreVocalUI inherits Window {
     callback air-changed(float);
     callback output-trim-changed(float);
     callback phase-flip-changed(bool);
-    callback host-selected(string);
+    callback driver-selected(string);
     callback input-selected(string);
     callback output-selected(string);
     callback restart-clicked();
@@ -369,10 +369,10 @@ export component PreVocalUI inherits Window {
                     }
                     ComboBox {
                         min-width: 220px;
-                        model: root.available-hosts;
-                        current-index: root.host-index;
+                        model: root.available-drivers;
+                        current-index: root.driver-index;
                         selected(v) => {
-                            root.host-selected(v);
+                            root.driver-selected(v);
                         }
                     }
                     Rectangle {
