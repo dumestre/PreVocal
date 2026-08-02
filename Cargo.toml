@@ -1,0 +1,40 @@
+[package]
+name = "PreVocal"
+version = "0.1.0"
+edition = "2024"
+authors = ["PreVocal Team <dev@prevocal.example>"]
+description = "PreVocal Vocal Bus Preamp with standalone Slint UI and nice-plug plugin targets."
+license = "MIT OR Apache-2.0"
+repository = "https://example.com/prevocal"
+keywords = ["audio", "dsp", "vst3", "clap", "preamp", "slint"]
+
+[lib]
+name = "prevocal"
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "prevocal-standalone"
+path = "src/main.rs"
+
+[features]
+default = ["nice-plug/vst3", "nice-plug/tracing-subscriber"]
+standalone = ["nice-plug/standalone", "nice-plug/vst3", "nice-plug/tracing-subscriber", "dep:cpal"]
+
+[dependencies]
+nice-plug = { git = "https://codeberg.org/RustAudio/nice-plug", tag = "v0.2.3", default-features = false }
+slint = "1.17.1"
+cpal = { version = "0.18", optional = true }
+parking_lot = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "smallvec"] }
+
+[build-dependencies]
+slint-build = "1.17.1"
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"

@@ -1,0 +1,320 @@
+// PreVocal — Vocal Bus Preamp
+// Dark Studio Pro / Anodized Metal theme with Neon Purple accents.
+
+component VerticalFader inherits Rectangle {
+    in-out property <float> value: 0.0;
+    in property <float> minimum: 0.0;
+    in property <float> maximum: 1.0;
+    callback changed(float);
+
+    width: 44px;
+    height: 220px;
+
+    function normalized() -> float {
+        return clamp((root.value - root.minimum) / (root.maximum - root.minimum), 0.0, 1.0);
+    }
+    function thumbY() -> length {
+        return (root.height - 18px) * (1.0 - root.normalized());
+    }
+
+    // Track
+    Rectangle {
+        width: 8px;
+        height: parent.height;
+        x: (parent.width - self.width) / 2;
+        background: #3C096C;
+        border-radius: 4px;
+    }
+
+    // Purple fill
+    Rectangle {
+        width: 8px;
+        height: parent.height - root.thumbY();
+        x: (parent.width - self.width) / 2;
+        y: root.thumbY();
+        background: #9D4EDD;
+        border-radius: 4px;
+    }
+
+    // Thumb
+    Rectangle {
+        width: 40px;
+        height: 18px;
+        x: (parent.width - self.width) / 2;
+        y: root.thumbY();
+        background: #121214;
+        border-width: 2px;
+        border-color: #C77DFF;
+        border-radius: 9px;
+    }
+
+    TouchArea {
+    width: parent.width;
+    height: parent.height;
+    pointer-event(e) => {
+        if (e.kind == PointerEventKind.down || self.pressed) {
+            root.value = clamp(
+                root.maximum - (self.mouse-y / parent.height) * (root.maximum - root.minimum),
+                root.minimum,
+                root.maximum
+            ).round();
+            root.changed(root.value);
+        }
+    }
+}
+}
+
+component ControlKnob inherits Rectangle {
+    in-out property <float> value: 0.0;
+    in property <float> minimum: 0.0;
+    in property <float> maximum: 1.0;
+    callback changed(float);
+
+    width: 120px;
+    height: 120px;
+
+    function normalized() -> float {
+        return clamp((root.value - root.minimum) / (root.maximum - root.minimum), 0.0, 1.0);
+    }
+
+    // Outer ring
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: parent.width / 2;
+        background: #1E1E24;
+        border-width: 3px;
+        border-color: #3C096C;
+    }
+
+    // Inner face
+    Rectangle {
+        width: parent.width - 30px;
+        height: parent.height - 30px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        border-radius: (parent.width - 30px) / 2;
+        background: #121214;
+        border-width: 1px;
+        border-color: rgba(157, 78, 221, 0.18);
+    }
+
+    // Indicator pointer
+    Rectangle {
+    width: 5px;
+    height: 38px;
+    x: (parent.width - self.width) / 2;
+    y: parent.height / 2 - self.height;
+    background: #C77DFF;
+    border-radius: 2px;
+    transform-origin: { x: self.width / 2, y: self.height };
+    transform-rotation: -135deg + root.normalized() * 270deg;
+}
+
+    TouchArea {
+        width: parent.width;
+        height: parent.height;
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.move && self.pressed) {
+                root.value = clamp(root.minimum + (1.0 - self.mouse-y / parent.height) * (root.maximum - root.minimum), root.minimum, root.maximum);
+                root.changed(root.value);
+            }
+        }
+    }
+}
+
+component PhaseToggle inherits Rectangle {
+    in-out property <bool> checked: false;
+    callback toggled(bool);
+
+    width: 150px;
+    height: 52px;
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: 14px;
+        background: root.checked ? #3C096C : #1E1E24;
+        border-width: 2px;
+        border-color: root.checked ? #9D4EDD : rgba(157, 78, 221, 0.3);
+    }
+
+    // LED indicator
+    Rectangle {
+        width: 10px;
+        height: 10px;
+        x: 16px;
+        y: (parent.height - self.height) / 2;
+        border-radius: self.width / 2;
+        background: root.checked ? #C77DFF : #3C096C;
+        drop-shadow-blur: root.checked ? 8px : 0px;
+        drop-shadow-color: #9D4EDD;
+        drop-shadow-offset-x: 0px;
+        drop-shadow-offset-y: 0px;
+    }
+
+    Text {
+        x: 36px;
+        y: (parent.height - self.height) / 2;
+        text: root.checked ? "PHASE 180°" : "PHASE 0°";
+        color: root.checked ? #FFFFFF : #A0A0B0;
+        font-size: 14px;
+        font-weight: 600;
+    }
+
+    TouchArea {
+        width: parent.width;
+        height: parent.height;
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+}
+
+export component PreVocalUI inherits Window {
+    preferred-width: 1000px;
+    preferred-height: 640px;
+    title: "PreVocal — Vocal Bus Preamp";
+    background: #121214;
+
+    in-out property <float> drive: 0.0;
+    in-out property <float> hpf: 20.0;
+    in-out property <float> air: 0.0;
+    in-out property <float> output-trim: 0.0;
+    in-out property <bool> phase-flip: false;
+
+    callback drive-changed(float);
+    callback hpf-changed(float);
+    callback air-changed(float);
+    callback output-trim-changed(float);
+    callback phase-flip-changed(bool);
+
+    VerticalLayout {
+        padding: 26px;
+        spacing: 20px;
+        alignment: LayoutAlignment.stretch;
+        height: 100%;
+
+        // Header
+            
+        HorizontalLayout {
+            spacing: 14px;
+            alignment: LayoutAlignment.start;
+            cross-axis-alignment: center;
+
+           
+
+            Text {
+                text: "PreVocal";
+                font-size: 34px;
+                font-weight: 700;
+                color: #FFFFFF;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                width: 1px;
+                height: 32px;
+                background: #3C096C;
+                
+                
+            }
+            Text {
+                text: "Vocal Bus Preamp";
+                font-size: 16px;
+                color: #A0A0B0;
+                vertical-alignment: center;
+            }
+        }
+    
+    
+
+        // Main control panel
+        Rectangle {
+            border-radius: 22px;
+            background: #1E1E24;
+            border-width: 1px;
+            border-color: rgba(157, 78, 221, 0.14);
+            horizontal-stretch: 1;
+            vertical-stretch: 1;
+
+            HorizontalLayout {
+                padding: 24px;
+                spacing: 20px;
+                height: 100%;
+
+                VerticalLayout {
+                    spacing: 16px;
+                    alignment: center;
+                    horizontal-stretch: 1;
+
+                    Text { text: "DRIVE"; font-size: 13px; color: #A0A0B0; }
+                    VerticalFader {
+                        minimum: 0.;
+                        maximum: 100;
+                        value <=> root.drive;
+                        changed(v) => { root.drive-changed(v); }
+                    }
+                    Text { text: root.drive.round() + "%"; font-size: 14px; color: #C77DFF; }
+                }
+
+                VerticalLayout {
+                    spacing: 16px;
+                    alignment: center;
+                    horizontal-stretch: 1;
+
+                    Text { text: "OUTPUT TRIM"; font-size: 13px; color: #A0A0B0; }
+                    VerticalFader {
+                        minimum: -12.0;
+                        maximum: 12.0;
+                        value <=> root.output-trim;
+                        changed(v) => { root.output-trim-changed(v); }
+                    }
+                    Text { text: root.output-trim + " dB"; font-size: 14px; color: #C77DFF; }
+                }
+
+                VerticalLayout {
+                    spacing: 16px;
+                    alignment: center;
+                    horizontal-stretch: 1;
+
+                    Text { text: "HPF"; font-size: 13px; color: #A0A0B0; }
+                    ControlKnob {
+                        minimum: 20.0;
+                        maximum: 200.0;
+                        value <=> root.hpf;
+                        changed(v) => { root.hpf-changed(v); }
+                    }
+                    Text { text: root.hpf; font-size: 14px; color: #C77DFF; }
+                }
+
+                VerticalLayout {
+                    spacing: 16px;
+                    alignment: center;
+                    horizontal-stretch: 1;
+
+                    Text { text: "AIR"; font-size: 13px; color: #A0A0B0; }
+                    ControlKnob {
+                        minimum: 0.0;
+                        maximum: 6.0;
+                        value <=> root.air;
+                        changed(v) => { root.air-changed(v); }
+                    }
+                    Text { text: root.air; font-size: 14px; color: #C77DFF; }
+                }
+
+                VerticalLayout {
+                    spacing: 16px;
+                    alignment: center;
+                    horizontal-stretch: 1;
+
+                    PhaseToggle {
+                        checked <=> root.phase-flip;
+                        toggled(v) => { root.phase-flip-changed(v); }
+                    }
+                    Text { text: "PHASE FLIP"; font-size: 13px; color: #A0A0B0; }
+                }
+            }
+        }
+    }
+}
