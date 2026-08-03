@@ -348,8 +348,7 @@ export component PreVocalUI inherits Window {
     
 
         // Audio driver / device selector (standalone only)
-        Rectangle {
-            visible: root.audio-controls-visible;
+        if root.audio-controls-visible: Rectangle {
             border-radius: 14px;
             background: #1E1E24;
             border-width: 1px;

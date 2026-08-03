@@ -37,6 +37,21 @@ use crate::PreVocalParams;
 /// platforms fall back to a regular (top-level) editor window.
 static PARENT_WINDOW: Mutex<Option<NonZeroIsize>> = Mutex::new(None);
 
+/// Preferred editor size in logical pixels (reported to the host via
+/// [`Editor::size`]).
+const LOGICAL_WIDTH: f32 = 1000.0;
+const LOGICAL_HEIGHT: f32 = 640.0;
+
+/// Host DPI scale factor, set through [`Editor::set_scale_factor`]. Used to
+/// compute the initial physical window size before the host calls `set_size`.
+static SCALE_FACTOR: Mutex<f64> = Mutex::new(1.0);
+
+/// Most recent size requested by the host through [`Editor::set_size`].
+/// `set_size` can be called before the UI thread's event loop is running, in
+/// which case `slint::invoke_from_event_loop` fails and the editor thread
+/// applies this value itself once the window exists.
+static PENDING_HOST_SIZE: Mutex<Option<(u32, u32)>> = Mutex::new(None);
+
 slint::include_modules!();
 
 /// The `Editor` handed to nice-plug. It holds the shared [`PreVocalParams`] plus a
@@ -93,6 +108,32 @@ fn push_to_ui(active: &Mutex<Option<slint::Weak<PreVocalUI>>>, update: impl FnOn
             update(&ui);
         }
     });
+}
+
+/// Resize the editor window to `size` (physical pixels) on the UI thread, so
+/// the child window always fills the host's view. Safe from any thread.
+fn resize_editor_window(
+    active: &Mutex<Option<slint::Weak<PreVocalUI>>>,
+    size: (u32, u32),
+) {
+    let weak = match active.lock().unwrap().as_ref() {
+        Some(weak) => weak.clone(),
+        None => return,
+    };
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.window().set_size(slint::PhysicalSize::new(size.0, size.1));
+        }
+    });
+}
+
+/// The preferred size at the current host DPI scale factor (physical pixels).
+fn preferred_physical_size() -> slint::PhysicalSize {
+    let sf = *SCALE_FACTOR.lock().unwrap() as f32;
+    slint::PhysicalSize::new(
+        (LOGICAL_WIDTH * sf).round() as u32,
+        (LOGICAL_HEIGHT * sf).round() as u32,
+    )
 }
 
 impl Editor for SlintEditor {
@@ -173,8 +214,18 @@ impl Editor for SlintEditor {
                 // the title bar and the close/minimize/maximize buttons.
                 ui.set_plugin_mode(true);
 
-                // Force initial window size (1000x640) in case host doesn't call set_size immediately
-                ui.window().set_size(slint::PhysicalSize::new(1000, 640));
+                // Size the child window to the host's view. If the host already
+                // called `set_size` before the event loop was running, apply that
+                // size now; otherwise fall back to the logical preferred size at
+                // the host's DPI scale factor.
+                let initial = PENDING_HOST_SIZE.lock().unwrap().take().map_or_else(
+                    || {
+                        let s = preferred_physical_size();
+                        (s.width, s.height)
+                    },
+                    |s| s,
+                );
+                ui.window().set_size(slint::PhysicalSize::new(initial.0, initial.1));
 
                 ui.set_audio_controls_visible(false);
                 apply_param_values(&ui, &params);
@@ -243,10 +294,13 @@ impl Editor for SlintEditor {
     }
 
     fn size(&self) -> Size {
-        Size::Logical(LogicalSize::new(1000.0, 640.0))
+        Size::Logical(LogicalSize::new(LOGICAL_WIDTH as f64, LOGICAL_HEIGHT as f64))
     }
 
-    fn set_scale_factor(&self, _factor: f64) -> bool {
+    fn set_scale_factor(&self, factor: f64) -> bool {
+        *SCALE_FACTOR.lock().unwrap() = factor;
+        let size = preferred_physical_size();
+        resize_editor_window(&self.active, (size.width, size.height));
         true
     }
 
@@ -286,13 +340,11 @@ impl Editor for SlintEditor {
     }
 
     fn set_size(&self, physical_size: PhysicalSize<u32>) -> bool {
-        let _ = physical_size;
-        // Request a redraw when the host resizes the editor
-        if let Some(weak) = self.active.lock().unwrap().as_ref() {
-            if let Some(ui) = weak.upgrade() {
-                let _ = ui.window().request_redraw();
-            }
-        }
+        // The host resized its view; keep the child window filling it. The size
+        // is also stashed in case the event loop isn't running yet (the editor
+        // thread applies it right after the window is created).
+        *PENDING_HOST_SIZE.lock().unwrap() = Some((physical_size.width, physical_size.height));
+        resize_editor_window(&self.active, (physical_size.width, physical_size.height));
         true
     }
 }
