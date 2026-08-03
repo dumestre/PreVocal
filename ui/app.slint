@@ -254,6 +254,10 @@ export component PreVocalUI inherits Window {
     preferred-height: 640px;
     title: "PreVocal — Vocal Bus Preamp";
     background: #121214;
+    // When embedded in a DAW the host owns the frame: no title bar, no
+    // close/minimize/maximize buttons (the plugin editor sets this to true).
+    in-out property <bool> plugin-mode: false;
+    no-frame: root.plugin-mode;
 
     in-out property <float> drive: 0.0;
     in-out property <float> hpf: 20.0;

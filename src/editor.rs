@@ -134,17 +134,29 @@ impl Editor for SlintEditor {
                     } else {
                         tracing::warn!("Parent window hook called but no HWND available");
                     }
+                    // The Slint winit backend starts every window as hidden
+                    // (`visible: false`). `ui.run()` would show it, but the plugin
+                    // editor uses `run_event_loop()`, so the child window would
+                    // never appear: the host would only show an empty frame.
+                    attrs.visible = true;
+                    // Opaque UI (background #121214): skip winit's DWM blur-behind
+                    // path, which fails with E_INVALIDARG on WS_CHILD windows and
+                    // can leave the plugin view blank.
+                    attrs.transparent = false;
                     attrs
                 };
                 if let Err(e) = slint::BackendSelector::new()
                     .backend_name("winit".into())
-                    .renderer_name("femtovg".to_string())
+                    // Software renderer (GDI/softbuffer) instead of femtovg/OpenGL:
+                    // the glutin path (EGL/WGL) fails to present into a WS_CHILD
+                    // window, leaving the host's editor view blank.
+                    .renderer_name("sw".to_string())
                     .with_winit_window_attributes_hook(hook)
                     .select()
                 {
                     tracing::error!("Failed to select Slint winit backend: {:?}", e);
                 } else {
-                    tracing::info!("Slint winit backend selected with femtovg renderer");
+                    tracing::info!("Slint winit backend selected with software renderer");
                 }
 
                 let ui = match PreVocalUI::new() {
@@ -154,6 +166,12 @@ impl Editor for SlintEditor {
                         return;
                     }
                 };
+
+                // The DAW hosts the plugin view, so the editor must be frameless.
+                // Slint overrides the window-attributes hook's `decorations` from
+                // the `.slint` `no-frame` binding, so this is what actually strips
+                // the title bar and the close/minimize/maximize buttons.
+                ui.set_plugin_mode(true);
 
                 // Force initial window size (1000x640) in case host doesn't call set_size immediately
                 ui.window().set_size(slint::PhysicalSize::new(1000, 640));

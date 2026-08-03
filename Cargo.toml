@@ -18,15 +18,14 @@ path = "src/main.rs"
 
 [features]
 default = ["nice-plug/vst3", "nice-plug/tracing-subscriber"]
-standalone = ["nice-plug/standalone", "nice-plug/vst3", "nice-plug/tracing-subscriber", "asio"]
 # Windows-only: enables the ASIO host (ASIO4ALL, Steinberg ASIO, etc.) in the
 # standalone. Requires LLVM/Clang + MSVC build tools to compile the ASIO SDK.
-asio = ["dep:cpal", "cpal/asio"]
+asio = ["cpal/asio"]
 
 [dependencies]
 nice-plug = { git = "https://codeberg.org/RustAudio/nice-plug", tag = "v0.2.3", default-features = false }
-slint = { version = "1.17.1", features = ["renderer-winit-femtovg", "unstable-winit-030"] }
-cpal = { version = "0.18", optional = true }
+slint = { version = "1.17.1", features = ["renderer-winit-femtovg", "renderer-winit-software", "unstable-winit-030"] }
+cpal = "0.18"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "smallvec"] }
 chrono = "0.4"

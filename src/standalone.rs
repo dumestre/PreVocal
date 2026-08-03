@@ -380,13 +380,26 @@ impl AudioManager {
         mgr
     }
 
+    /// Whether a host id refers to the ASIO host. Only compiled when the
+    /// `asio` feature is enabled; `cpal::HostId::Asio` doesn't exist otherwise.
+    fn is_asio_host(host_id: cpal::HostId) -> bool {
+        #[cfg(feature = "asio")]
+        {
+            return host_id == cpal::HostId::Asio;
+        }
+        #[cfg(not(feature = "asio"))]
+        {
+            let _ = host_id;
+            false
+        }
+    }
+
     /// Enumerate the selectable drivers. ASIO contributes one entry per driver;
     /// every other host contributes a single entry.
     fn enum_drivers() -> Vec<DriverEntry> {
         let mut drivers = Vec::new();
         for host_id in cpal::available_hosts() {
-            let is_asio = host_id == cpal::HostId::Asio;
-            if is_asio {
+            if Self::is_asio_host(host_id) {
                 let Ok(host) = cpal::host_from_id(host_id) else {
                     continue;
                 };
