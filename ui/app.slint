@@ -24,7 +24,7 @@ component VerticalFader inherits Rectangle {
         width: 8px;
         height: parent.height;
         x: (parent.width - self.width) / 2;
-        background: #3C096C;
+        background: Colors.darkgray;
         border-radius: 4px;
     }
 
@@ -40,14 +40,14 @@ component VerticalFader inherits Rectangle {
 
     // Thumb
     Rectangle {
-        width: 40px;
-        height: 18px;
+        width: 22px;
+        height: 22px;
         x: (parent.width - self.width) / 2;
         y: root.thumbY();
-        background: #121214;
+        background: Colors.darkgoldenrod;
         border-width: 2px;
         border-color: #C77DFF;
-        border-radius: 9px;
+        border-radius: parent.width / 2;
     }
 
     TouchArea {
@@ -493,10 +493,29 @@ export component PreVocalUI inherits Window {
             horizontal-stretch: 1;
             vertical-stretch: 1;
 
-            HorizontalLayout {
+            VerticalLayout {
                 padding: 24px;
                 spacing: 20px;
                 height: 100%;
+
+                // Drive status image (off / half / full), centered at the top of the panel
+                HorizontalLayout {
+                    alignment: LayoutAlignment.center;
+
+                    Image {
+                        width: 120px;
+                        height: 180px;
+                        image-fit: contain;
+                        source: root.drive <= 0.0 ? @image-url("../src/icons/off.png")
+                              : root.drive >= 24.0 ? @image-url("../src/icons/100.png")
+                              : @image-url("../src/icons/50.png");
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 20px;
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
 
                 // Input meter (left)
                 VerticalLayout {
@@ -592,6 +611,7 @@ export component PreVocalUI inherits Window {
                         peak: root.output-peak;
                     }
                     Text { text: "OUT"; font-size: 11px; color: #A0A0B0; }
+                }
                 }
             }
         }
