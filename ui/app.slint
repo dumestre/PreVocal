@@ -272,6 +272,8 @@ export component PreVocalUI inherits Window {
     in-out property <int> output-index: -1;
     in-out property <string> audio-status: "";
     in-out property <bool> audio-running: false;
+    // Hidden by the plugin editor (audio is handled by the DAW host), shown in the standalone.
+    in-out property <bool> audio-controls-visible: true;
 
     callback drive-changed(float);
     callback hpf-changed(float);
@@ -341,8 +343,9 @@ export component PreVocalUI inherits Window {
     
     
 
-        // Audio driver / device selector
+        // Audio driver / device selector (standalone only)
         Rectangle {
+            visible: root.audio-controls-visible;
             border-radius: 14px;
             background: #1E1E24;
             border-width: 1px;

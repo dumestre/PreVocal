@@ -1,66 +1,4 @@
 [package]
-name = "prevocal"
-version = "0.1.0"
-edition = "2021"
-description = "Vocal Bus Preamp - Plugin VST3/CLAP e Standalone"
-license = "MIT"
-repository = "https://github.com/seu-usuario/prevocal"
-categories = ["audio", "plugins", "gui"]
-keywords = ["vst3", "clap", "audio-plugin", "preamp", "vocal", "dsp", "slint"]
-
-[workspace]
-
-[lib]
-name = "prevocal"
-crate-type = ["cdylib", "rlib"]
-
-[[bin]]
-name = "prevocal-standalone"
-path = "src/main.rs"
-
-[dependencies]
-# Plugin framework - RustAudio nice-plug do Codeberg
-nice-plug = { git = "https://codeberg.org/RustAudio/nice-plug", branch = "main" }
-
-# Slint GUI
-slint = { version = "1.5", features = ["femtovg", "std"] }
-
-# DSP & Math
-nih-plug = { version = "0.2", features = ["vst3", "clap", "std"] }
-atomic_float = "0.2"
-biquad = "0.6"
-fundsp = { version = "0.2", features = ["std"] }
-valib = { version = "0.3", features = ["std"] }
-
-# Audio I/O para standalone
-cpal = { version = "0.15", features = ["jack"] }
-ringbuf = { version = "0.3", features = ["std"] }
-
-# Utils
-anyhow = "1.0"
-thiserror = "1.0"
-parking_lot = "0.12"
-once_cell = "1.19"
-
-[build-dependencies]
-slint-build = "1.5"
-
-[features]
-default = ["vst3", "clap"]
-vst3 = ["nice-plug/vst3", "nih-plug/vst3"]
-clap = ["nice-plug/clap", "nih-plug/clap"]
-standalone = []
-
-[profile.release]
-lto = true
-codegen-units = 1
-opt-level = 3
-panic = "abort"
-strip = true
-
-[profile.dev]
-opt-level = 1
-debug = truea[package]
 name = "PreVocal"
 version = "0.1.0"
 edition = "2024"
@@ -87,10 +25,12 @@ asio = ["dep:cpal", "cpal/asio"]
 
 [dependencies]
 nice-plug = { git = "https://codeberg.org/RustAudio/nice-plug", tag = "v0.2.3", default-features = false }
-slint = "1.17.1"
+slint = { version = "1.17.1", features = ["renderer-winit-femtovg", "unstable-winit-030"] }
 cpal = { version = "0.18", optional = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "smallvec"] }
+chrono = "0.4"
+raw-window-handle = "0.6"
 
 [build-dependencies]
 slint-build = "1.17.1"

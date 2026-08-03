@@ -1,19 +1,25 @@
 //! Slint editor embedded into the DAW's window.
 //!
-//! The host passes a native parent window handle through [`ParentWindowHandle`].
-//! We inject it into the winit `WindowAttributes` via
-//! [`slint::BackendSelector::with_winit_window_attributes_hook()`] *before* the
-//! winit backend creates its window, so the Slint window becomes a `WS_CHILD`
-//! confined to the DAW's view (see winit's `WindowAttributes::with_parent_window`).
+//! This module is the *plugin-only* path: the host passes a native parent window
+//! handle through [`ParentWindowHandle`], and we inject it into the winit
+//! `WindowAttributes` via [`slint::BackendSelector::with_winit_window_attributes_hook()`]
+//! *before* the winit backend creates its window, so the Slint window is born as a
+//! `WS_CHILD` confined to the DAW's view (winit's
+//! `WindowAttributes::with_parent_window`). We never reparent or patch styles after
+//! creation (no `SetParent`/`SetWindowLongPtrW`), which is what breaks embedding.
 //!
 //! The event loop and the Slint UI run on a dedicated thread (winit is created
-//! with `any_thread` support on Windows/X11). Parameter edits from the UI go
-//! through [`ParamSetter`]; parameter changes coming from the host/audio thread
-//! are pushed back into the UI with [`slint::invoke_from_event_loop()`].
+//! with `any_thread` support on Windows/X11), driven by [`slint::run_event_loop()`]
+//! rather than `Window::run()` so the editor never assumes it owns an application.
+//! Parameter edits from the UI go through [`ParamSetter`]; parameter changes coming
+//! from the host/audio thread are pushed back into the UI with
+//! [`slint::invoke_from_event_loop()`].
 //!
 //! Note: the winit backend only supports a single event loop per process, so
 //! only one editor instance can be open at a time (this matches how most hosts
 //! open a single plugin editor).
+//!
+//! The desktop standalone is a separate concern and lives in `standalone.rs`.
 
 use std::any::Any;
 use std::num::NonZeroIsize;
@@ -23,8 +29,6 @@ use nice_plug::context::gui::{GuiContext, ParamSetter};
 use nice_plug::editor::dpi::{LogicalSize, PhysicalSize, Size};
 use nice_plug::editor::{Editor, ParentWindowHandle};
 use nice_plug::prelude::*;
-use slint::winit_030::winit::platform::windows::WindowAttributesExtWindows;
-use slint::winit_030::WinitWindowAccessor;
 
 use crate::PreVocalParams;
 
@@ -114,20 +118,19 @@ impl Editor for SlintEditor {
             .spawn(move || {
                 // CRITICAL: Select backend FIRST, before any Slint UI code runs in this thread
                 let hook = |mut attrs: slint::winit_030::winit::window::WindowAttributes| {
-                    // Force embedded child window appearance: no transparency, no decorations
-                    attrs.transparent = false;
+                    // The host draws the frame around the plugin view; a child window
+                    // must not bring its own decorations.
                     attrs.decorations = false;
                     attrs.resizable = false;
-                    attrs.visible = false; // We'll show after parenting
-                    
                     if let Some(hwnd) = *PARENT_WINDOW.lock().unwrap() {
                         tracing::info!("Applying parent window hook: HWND = {:?}", hwnd);
                         let raw = raw_window_handle::RawWindowHandle::Win32(
                             raw_window_handle::Win32WindowHandle::new(hwnd),
                         );
+                        // Creating the window as a WS_CHILD of the host's view up front
+                        // (instead of SetParent'ing it later) is what keeps the editor
+                        // properly embedded.
                         attrs = unsafe { attrs.with_parent_window(Some(raw)) };
-                        // Also set as owner to prevent separate taskbar entry
-                        attrs = attrs.with_owner_window(hwnd.get() as isize);
                     } else {
                         tracing::warn!("Parent window hook called but no HWND available");
                     }
@@ -209,7 +212,10 @@ impl Editor for SlintEditor {
 
                 *active.lock().unwrap() = Some(ui.as_weak());
 
-                let _ = ui.run();
+                // `run_event_loop()` instead of `ui.run()`: the plugin editor must not
+                // manage its own window lifetime (a `run()` on the UI assumes a
+                // standalone application and fights the host's window management).
+                let _ = slint::run_event_loop();
             })
             .expect("failed to spawn the editor thread");
 
