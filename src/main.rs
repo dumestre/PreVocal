@@ -2,7 +2,7 @@
 //!
 //! This target runs the same DSP as the plugin as a native application using Slint for
 //! the GUI and cpal for realtime audio I/O, so it can be tested without a DAW on both
-//! Windows and Linux. The DSP lives in `prevocal::PreVocalDsp` and is shared with the
+//! Windows and Linux. The DSP lives in `PreVocal::PreVocalDsp` and is shared with the
 //! plugin `lib.rs`.
 //!
 //! The audio graph is:
@@ -26,7 +26,7 @@ mod standalone {
     use cpal::{FromSample, Sample, SizedSample};
     use nice_plug::params::InternalParamMut;
     use nice_plug::prelude::*;
-    use prevocal::{PreVocalDsp, PreVocalParams};
+    use PreVocal::{PreVocalDsp, PreVocalParams};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -443,8 +443,33 @@ mod standalone {
             entries
         }
 
-        fn make_device_labels(entries: &[DeviceEntry]) -> Vec<String> {
-            entries.iter().map(|e| e.device_name.clone()).collect()
+        fn make_device_labels(entries: &[DeviceEntry], show_channels: bool) -> Vec<String> {
+            entries
+                .iter()
+                .map(|e| Self::device_display_label(e, show_channels))
+                .collect()
+        }
+
+        /// Build the combo-box label for a device. For ASIO the device *is* the driver,
+        /// so the label appends the channel counts to read like a real audio interface
+        /// (e.g. "Realtek ASIO (2 in / 2 out)") and stay consistent across all drivers.
+        fn device_display_label(entry: &DeviceEntry, show_channels: bool) -> String {
+            if show_channels {
+                let ins = entry
+                    .device
+                    .default_input_config()
+                    .ok()
+                    .map(|c| c.channels());
+                let outs = entry
+                    .device
+                    .default_output_config()
+                    .ok()
+                    .map(|c| c.channels());
+                if let (Some(ins), Some(outs)) = (ins, outs) {
+                    return format!("{} ({} in / {} out)", entry.device_name, ins, outs);
+                }
+            }
+            entry.device_name.clone()
         }
 
         /// Split the selected driver's devices into input- and output-capable lists.
@@ -465,6 +490,7 @@ mod standalone {
                     .collect(),
                 None => all,
             };
+            let is_asio = driver.asio_driver.is_some();
             for entry in devices {
                 if entry.device.supports_input() {
                     self.input_devices.push(entry.clone());
@@ -473,8 +499,8 @@ mod standalone {
                     self.output_devices.push(entry);
                 }
             }
-            self.input_labels = Self::make_device_labels(&self.input_devices);
-            self.output_labels = Self::make_device_labels(&self.output_devices);
+            self.input_labels = Self::make_device_labels(&self.input_devices, is_asio);
+            self.output_labels = Self::make_device_labels(&self.output_devices, is_asio);
             self.input_current = self
                 .input_current
                 .min(self.input_devices.len().saturating_sub(1));
@@ -555,13 +581,16 @@ mod standalone {
             let host = cpal::host_from_id(host_id)
                 .map_err(|e| format!("Could not load host '{}': {e}", host_id.name()))?;
 
-            // The GUI picks the input and output device independently; fall back to the
-            // host defaults if a list is empty (e.g. no matching device after refresh).
+            // The GUI picks the input and output device independently. Fall back to the
+            // host defaults only for non-ASIO hosts: for ASIO, `default_input_device` is
+            // just the first driver in the registry, which is not what the user selected.
             let input_device = self
                 .input_devices
                 .get(self.input_current)
                 .map(|e| e.device.clone())
-                .or_else(|| host.default_input_device())
+                .or_else(|| {
+                    (driver.asio_driver.is_none()).then(|| host.default_input_device()).flatten()
+                })
                 .ok_or_else(|| {
                     format!("No input device available for host '{}'.", host_id.name())
                 })?;
@@ -569,7 +598,9 @@ mod standalone {
                 .output_devices
                 .get(self.output_current)
                 .map(|e| e.device.clone())
-                .or_else(|| host.default_output_device())
+                .or_else(|| {
+                    (driver.asio_driver.is_none()).then(|| host.default_output_device()).flatten()
+                })
                 .ok_or_else(|| {
                     format!("No output device available for host '{}'.", host_id.name())
                 })?;
@@ -647,6 +678,10 @@ mod standalone {
             self.driver_current = idx;
             self.input_current = 0;
             self.output_current = 0;
+            // Drop the current streams first: while an ASIO driver is held by an active
+            // stream, cpal's ASIO enumeration stops at the first driver that is already
+            // loaded (DriverAlreadyExists), hiding every other driver's devices.
+            self.stop();
             self.reload_devices();
             if let Err(e) = self.start() {
                 tracing::error!("Audio restart failed: {e}");

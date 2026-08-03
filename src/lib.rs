@@ -1,6 +1,33 @@
+#![allow(non_snake_case)]
+
 use nice_plug::prelude::*;
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::sync::Once;
+use std::panic;
+
+// Immediate file log on plugin load (before any other init)
+static INIT_LOG: Once = Once::new();
+fn log_plugin_load() {
+    INIT_LOG.call_once(|| {
+        let _ = std::fs::write(
+            r"C:\temp\prevocal_load.log",
+            format!("[{}] PreVocal plugin loaded\n", chrono::Local::now().format("%H:%M:%S%.3f")),
+        );
+    });
+}
+
+// Panic hook to catch crashes
+fn set_panic_hook() {
+    panic::set_hook(Box::new(|info| {
+        let _ = std::fs::write(
+            r"C:\temp\prevocal_panic.log",
+            format!("[{}] PANIC: {}\n", chrono::Local::now().format("%H:%M:%S%.3f"), info),
+        );
+    }));
+}
+
+mod editor;
 
 pub struct PreVocal {
     dsp: PreVocalDsp,
@@ -26,6 +53,8 @@ pub struct PreVocalParams {
 
 impl Default for PreVocal {
     fn default() -> Self {
+        log_plugin_load();
+        set_panic_hook();
         Self {
             dsp: PreVocalDsp::new(Arc::new(PreVocalParams::default())),
         }
@@ -123,6 +152,10 @@ impl Plugin for PreVocal {
         self.dsp.params()
     }
 
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        Some(Box::new(editor::SlintEditor::new(self.dsp.params())))
+    }
+
     fn initialize(
         &mut self,
         audio_io_layout: &AudioIOLayout,
@@ -151,13 +184,15 @@ impl Plugin for PreVocal {
         Some(
             tracing::subscriber::set_global_default(
                 tracing_subscriber::FmtSubscriber::builder()
-                    .with_max_level(if cfg!(debug_assertions) {
-                        tracing::level_filters::LevelFilter::DEBUG
-                    } else {
-                        tracing::level_filters::LevelFilter::INFO
-                    })
+                    .with_max_level(tracing::level_filters::LevelFilter::TRACE)
                     .with_ansi(false)
-                    .with_writer(nice_plug::log::writer_from_env())
+                    .with_writer(move || {
+                        std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(r"C:\temp\prevocal_plugin.log")
+                            .unwrap_or_else(|_| std::fs::File::create(r"C:\temp\prevocal_plugin.log").unwrap())
+                    })
                     .finish(),
             )
             .is_ok(),

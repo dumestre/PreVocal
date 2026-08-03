@@ -75,8 +75,14 @@ cargo install cargo-nice-plug
 Compile e empacote:
 
 ```sh
-cargo build --release
-cargo nice-plug bundle --release
+
+
+cargo build --release --features standalone   # exe standalone
+
+$env:LIBCLANG_PATH = "$env:ProgramFiles\LLVM\bin"
+$env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+cargo nice-plug bundle PreVocal --release             # bundles VST3/CLAP
+
 ```
 
 Os bundles aparecerão em `target/nice-plug/`.

@@ -1,51 +1,128 @@
-Atue como um Engenheiro de Software Sênior especialista em Rust, DSP (Digital Signal Processing) e GUIs com Slint.
+Achei o problema.
 
-Preciso da estrutura de código completa, limpa e pronta para compilar do projeto **"PreVocal"** (Pré-amplificador de vocal em Rust).
+Você está fazendo duas abordagens diferentes ao mesmo tempo, e elas entram em conflito.
 
-### Requisito Principal de Framework:
-Utilize a biblioteca **`nice-plug`** da organização RustAudio (hospedada no Codeberg: `https://codeberg.org/RustAudio/nice-plug`) como a abstração do plugin.
+Você já usa:
 
-O projeto DEVE ser estruturado em **dois alvos (targets) no mesmo repositório**:
-1. **Executável Standalone (`src/main.rs`):** Para rodar diretamente via `cargo run`, testando a GUI em Slint e o processamento de áudio em tempo real via sistema/microfone no Linux sem precisar de DAW.
-2. **Biblioteca de Plugin (`src/lib.rs`):** Para expor a interface de plugin (VST3 e CLAP) para ser empacotada e usada em DAWs.
+.with_winit_window_attributes_hook(hook)
 
----
+e dentro do hook:
 
-### 1. Especificações do Motor DSP (Rust):
-Implemente o áudio em tempo real com suporte a suavização de parâmetros (smoothing):
-- **Drive / Input Gain (0.0 a +24.0 dB):** Saturação macia (Soft Clipping) usando a função `tanh` com compensação de ganho para harmônicos quentes de válvula.
-- **HPF / Low Cut (20 Hz a 200 Hz):** Filtro Passa-Altas Butterworth de 2ª ordem (12 dB/oitava) para limpeza dos sub-graves vocais.
-- **Air / High Shelf (0.0 a +6.0 dB a 10 kHz):** Ganho de agudos para dar transparência e brilho ao vocal.
-- **Phase Flip (0° / 180°):** Inversão de polaridade do sinal ($180^\circ$).
-- **Output Trim (-12.0 a +12.0 dB):** Ganho de saída final.
+attrs = unsafe { attrs.with_parent_window(Some(raw)) };
+attrs.decorations = false;
+attrs.visible = false;
 
----
+Isso já é a forma correta de criar uma janela filha.
 
-### 2. Interface Gráfica no Slint (`ui/app.slint`):
-- **Estilo Visual:** Dark Studio Pro / Anodized Metal com sotaques em Roxo Neon/Ultravioleta.
-- **Paleta de Cores:**
-  - Background: `#121214` (Grafite Escuro Fosco)
-  - Cards/Painéis: `#1E1E24` (Cinza Escuro de Contraste)
-  - Acento Principal: `#9D4EDD` (Roxo Neon) e `#C77DFF` (Highlight Purple)
-  - Faixas/Detalhes: `#3C096C`
-  - Textos: `#FFFFFF` (Título) e `#A0A0B0` (Rótulos)
-- **Elementos do Layout:**
-  - Header moderno com o título **PREVOCAL** e a indicação "Vocal Bus Preamp".
-  - Sliders/Faders verticais estilizados com preenchimento roxo para **Drive** e **Output Trim**.
-  - Knobs circulares estilizados para **HPF** e **Air**.
-  - Botão com indicador luminoso roxo para **Phase Flip (180°)**.
+Mas depois você faz isto:
 
----
+SetParent(child_hwnd, hwnd.get() as isize);
 
-### 3. Arquivos e Estrutura que Você Deve Gerar:
+let mut style = GetWindowLongPtrW(...);
 
-1. **`Cargo.toml`:** 
-   - Dependência do `nice-plug` apontando para o repositório da RustAudio / Codeberg (`git = "https://codeberg.org/RustAudio/nice-plug"`).
-   - Configurações do `slint` e `slint-build`.
-   - Definição do target `[lib]` (cdylib/rlib) e do target `[[bin]]` (`prevocal-standalone`).
-2. **`ui/app.slint`:** O arquivo completo com os componentes visuais, layout e tema roxo.
-3. **`src/lib.rs`:** Estrutura base do plugin usando `nice-plug`, parâmetros, bindings da GUI e o algoritmo de DSP.
-4. **`src/main.rs`:** Código de entrada para o modo Standalone rodar a janela do Slint e o áudio isoladamente via `cargo run`.
-5. **Instruções de Execução:** Comandos exatos para testar o modo standalone e para gerar os bundles VST3/CLAP no Linux.
+style &= !(WS_CAPTION | ...);
+style |= WS_CHILD | WS_VISIBLE;
 
-Escreva um código limpo, bem documentado e 100% aderente ao padrão da comunidade RustAudio.
+SetWindowLongPtrW(...);
+
+ShowWindow(...);
+
+Ou seja, você cria a janela pelo Winit e depois tenta transformá-la na marra em WS_CHILD.
+
+Isso costuma produzir exatamente esse efeito de:
+
+janela dentro da janela;
+barra de título aparecendo;
+moldura branca;
+comportamento estranho em hosts.
+Outra coisa que me chamou atenção
+
+Você faz:
+
+ui.run();
+
+run() foi feito para aplicações independentes.
+
+Em editor de plugin normalmente usa-se:
+
+slint::run_event_loop()
+
+ou deixa o backend controlar o loop.
+
+Muitos problemas de embedding acontecem justamente porque run() entende que está gerenciando uma janela própria.
+
+Outra suspeita
+
+Você está usando
+
+renderer_name("femtovg")
+
+O backend femtovg historicamente teve vários problemas com embedding em plugins.
+
+Se existir suporte ao renderer de software ou Skia, vale testar.
+
+Minha principal suspeita (90%)
+
+O problema é este bloco inteiro:
+
+GetWindowLongPtrW
+SetWindowLongPtrW
+SetParent
+ShowWindow
+
+Ele não deveria existir.
+
+Se with_parent_window() funcionou, o Winit cria a janela corretamente.
+
+Se não funcionou, forçar SetParent() depois geralmente só mascara o problema.
+
+Eu começaria removendo completamente esse trecho:
+
+ui.window().with_winit_window(|winit_window| {
+    ...
+    SetParent(...)
+    SetWindowLongPtrW(...)
+    ShowWindow(...)
+});
+
+e deixaria somente o with_parent_window().
+
+Se continuar aparecendo uma janela dentro da outra, aí o problema provavelmente não é o seu código, mas uma limitação do Slint + winit para editores VST3/CLAP embutidos. Nesse caso, vale investigar especificamente como o nice-plug e o Slint implementam o embedding, porque esse comportamento não é o esperado.
+
+mas trmv versao standalone
+
+Sim, exatamente. Esse é o problema.
+
+Seu código está tentando servir duas situações diferentes:
+
+Standalone → precisa criar uma janela normal (WS_OVERLAPPEDWINDOW).
+Plugin VST3/CLAP → precisa ser uma janela embutida (WS_CHILD).
+
+No seu código atual você mistura os dois caminhos.
+
+O ideal é fazer algo assim:
+
+if let Some(parent) = parent_hwnd {
+    // Plugin
+    attrs = attrs.with_parent_window(...);
+} else {
+    // Standalone
+    // não chama with_parent_window()
+    // deixa decorations=true
+}
+
+E mais importante: não faça:
+
+SetParent(...)
+SetWindowLongPtr(...)
+
+quando estiver no modo standalone.
+
+Na verdade, eu separaria completamente:
+
+editor.rs → apenas o editor VST3/CLAP.
+standalone.rs → aplicação desktop.
+
+Misturar os dois na mesma lógica costuma gerar exatamente esses bugs de janela.
+
+A documentação do Slint inclusive cita suporte para incorporar a UI em aplicações hospedeiras (como DAWs), mas isso deve ser feito pelo mecanismo de embedding do backend, não convertendo uma janela standalone em filha depois que ela já foi criada.
