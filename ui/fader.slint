@@ -1,0 +1,64 @@
+// PreVocal — Vocal Bus Preamp
+// Fader: drawn track + purple fill (as before), with the fader.png artwork
+// used as the sliding button (thumb) on top of the track.
+
+export component VerticalFader inherits Rectangle {
+    in-out property <float> value: 0.0;
+    in property <float> minimum: 0.0;
+    in property <float> maximum: 1.0;
+    callback changed(float);
+
+    width: 44px;
+    height: 220px;
+
+    function normalized() -> float {
+        return clamp((root.value - root.minimum) / (root.maximum - root.minimum), 0.0, 1.0);
+    }
+    function thumbY() -> length {
+        return (root.height - 32px) * (1.0 - root.normalized());
+    }
+
+    // Track
+    Rectangle {
+        width: 4px;
+        height: parent.height;
+        x: (parent.width - self.width) / 2;
+        background: Colors.darkgray;
+        border-radius: 4px;
+    }
+
+    // Purple fill
+    Rectangle {
+        width: 4px;
+        height: parent.height - root.thumbY();
+        x: (parent.width - self.width) / 2;
+        y: root.thumbY();
+        background: #9D4EDD;
+        border-radius: 4px;
+    }
+
+    // Thumb: the fader.png button, riding the track
+    Image {
+        width: 28px;
+        height: 32px;
+        x: (parent.width - self.width) / 2;
+        y: root.thumbY();
+        source: @image-url("../src/icons/fader.png");
+        image-fit: contain;
+    }
+
+    TouchArea {
+        width: parent.width;
+        height: parent.height;
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down || self.pressed) {
+                root.value = clamp(
+                    root.maximum - (self.mouse-y / parent.height) * (root.maximum - root.minimum),
+                    root.minimum,
+                    root.maximum
+                ).round();
+                root.changed(root.value);
+            }
+        }
+    }
+}

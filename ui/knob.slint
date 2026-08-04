@@ -1,0 +1,101 @@
+export component ControlKnob inherits Rectangle {
+    in-out property <float> value: 0.5;
+    in property <float> minimum: 0.0;
+    in property <float> maximum: 1.0;
+    in property <float> default-value: 0.5;
+
+    property <float> drag-start-value: 0.0;
+    property <length> drag-start-y: 0px;
+    property <bool> dragging: false;
+    property <float> sensitivity: 0.0038;
+
+    callback changed(float);
+
+    width: 72px;
+    height: 72px;
+    background: transparent;
+
+    pure function normalized() -> float {
+        clamp((root.value - root.minimum) / (root.maximum - root.minimum), 0.0, 1.0);
+    }
+
+    pure function angle() -> angle {
+        -135deg + root.normalized() * 270deg;
+    }
+
+    // Glow no hover / drag
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: self.width / 2;
+        background: transparent;
+        border-width: 2px;
+        border-color: touch.has-hover || root.dragging
+            ? rgba(180, 150, 255, 0.4)
+            : transparent;
+        animate border-color { duration: 120ms; }
+    }
+
+    // Knob image (gira com o valor)
+    Image {
+        width: 100%;
+        height: 100%;
+        source: @image-url("../src/icons/knob.png");
+        image-fit: contain;
+
+        transform-rotation: root.angle();
+        transform-origin: { x: self.width / 2, y: self.height / 2 };
+    }
+
+    // Interação
+    touch := TouchArea {
+        width: 100%;
+        height: 100%;
+
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down {
+                root.dragging = true;
+                root.drag-start-y = self.mouse-y;
+                root.drag-start-value = root.value;
+                return true;
+            }
+
+            if event.kind == PointerEventKind.move && root.dragging {
+                let dy = self.mouse-y - root.drag-start-y;
+                let sens = root.sensitivity * (event.modifiers.shift ? 0.25 : 1.0);
+
+                root.value = clamp(
+                    root.drag-start-value - (dy / 1px) * sens * (root.maximum - root.minimum),
+                    root.minimum,
+                    root.maximum
+                );
+                root.changed(root.value);
+                return true;
+            }
+
+            if event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel {
+                root.dragging = false;
+                return true;
+            }
+            return false;
+        }
+
+        scroll-event(event) => {
+            let step = (root.maximum - root.minimum) * 0.03
+                * (event.modifiers.shift ? 0.25 : 1.0);
+
+            root.value = clamp(
+                root.value - (event.delta-y / 1px) * step * 0.07,
+                root.minimum,
+                root.maximum
+            );
+            root.changed(root.value);
+            return accept;
+        }
+
+        double-clicked => {
+            root.value = root.default-value;
+            root.changed(root.value);
+        }
+    }
+}
