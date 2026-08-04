@@ -356,6 +356,59 @@ export component PreVocalUI inherits Window {
             border-color: rgba(157, 78, 221, 0.14);
             horizontal-stretch: 1;
             vertical-stretch: 1;
+            clip: true;
+
+            // Front panel face (frente.jpg), clipped to the rounded corners
+            Image {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                source: @image-url("../src/icons/frente.jpg");
+                image-fit: cover;
+            }
+
+            // Faceplate screws on top of the panel image, one in each corner
+            Image {
+                width: 26px;
+                height: 26px;
+                x: 14px;
+                y: 14px;
+                source: @image-url("../src/icons/parafuso.png");
+                image-fit: contain;
+                transform-rotation: 15deg;
+                transform-origin: { x: self.width / 2, y: self.height / 2 };
+            }
+            Image {
+                width: 26px;
+                height: 26px;
+                x: parent.width - self.width - 14px;
+                y: 14px;
+                source: @image-url("../src/icons/parafuso.png");
+                image-fit: contain;
+                transform-rotation: 105deg;
+                transform-origin: { x: self.width / 2, y: self.height / 2 };
+            }
+            Image {
+                width: 26px;
+                height: 26px;
+                x: 14px;
+                y: parent.height - self.height - 14px;
+                source: @image-url("../src/icons/parafuso.png");
+                image-fit: contain;
+                transform-rotation: 210deg;
+                transform-origin: { x: self.width / 2, y: self.height / 2 };
+            }
+            Image {
+                width: 26px;
+                height: 26px;
+                x: parent.width - self.width - 14px;
+                y: parent.height - self.height - 14px;
+                source: @image-url("../src/icons/parafuso.png");
+                image-fit: contain;
+                transform-rotation: 315deg;
+                transform-origin: { x: self.width / 2, y: self.height / 2 };
+            }
 
             VerticalLayout {
                 padding: 24px;
@@ -477,52 +530,6 @@ export component PreVocalUI inherits Window {
                     Text { text: "OUT"; font-size: 11px; color: #A0A0B0; }
                 }
                 }
-            }
-
-            // Faceplate screws: parafuso.png, one in each corner, each
-            // rotated differently (screw slots at random tightening angles).
-            Image {
-                width: 26px;
-                height: 26px;
-                x: 14px;
-                y: 14px;
-                source: @image-url("../src/icons/parafuso.png");
-                image-fit: contain;
-                transform-rotation: 15deg;
-                transform-origin: { x: self.width / 2, y: self.height / 2 };
-            }
-            Image {
-                width: 26px;
-                height: 26px;
-                horizontal-alignment: ImageHorizontalAlignment.center;
-                x: parent.width - self.width - 14px;
-                y: 14px;
-                source: @image-url("../src/icons/parafuso.png");
-                horizontal-tiling: ImageTiling.none;
-                image-fit: ImageFit.fill;
-                image-rendering: ImageRendering.smooth;
-                transform-rotation: 105deg;
-                transform-origin: { x: self.width / 2, y: self.height / 2 };
-            }
-            Image {
-                width: 26px;
-                height: 26px;
-                x: 14px;
-                y: parent.height - self.height - 14px;
-                source: @image-url("../src/icons/parafuso.png");
-                image-fit: contain;
-                transform-rotation: 210deg;
-                transform-origin: { x: self.width / 2, y: self.height / 2 };
-            }
-            Image {
-                width: 26px;
-                height: 26px;
-                x: parent.width - self.width - 14px;
-                y: parent.height - self.height - 14px;
-                source: @image-url("../src/icons/parafuso.png");
-                image-fit: contain;
-                transform-rotation: 315deg;
-                transform-origin: { x: self.width / 2, y: self.height / 2 };
             }
         }
     }
