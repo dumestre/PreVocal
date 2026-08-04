@@ -1,0 +1,262 @@
+// PreVocal — Vocal Bus Preamp
+// VuMeter: analog VU meter with arc scale (-20..+3 dB), moving needle,
+// red zone (+1..+3 dB) and glass face. Standalone component (not wired yet).
+
+export component VuMeter inherits Rectangle {
+    in-out property <float> level: 0.0; // 0.0 = -20 dB ... 1.0 = +3 dB
+
+    // Face geometry (coordinates are relative to the inner face rectangle)
+    property <length> cx: 125px;
+    property <length> cy: 145px;
+    property <length> r-scale: 143px;
+    property <length> r-minor-in: 126px;
+    property <length> r-major-in: 116px;
+    property <length> r-label: 102px;
+    property <length> r-red: 130px;
+
+    width: 260px;
+    height: 170px;
+
+    animate level { duration: 90ms; easing: ease-out; }
+
+    // Scale: -20 dB (level 0) .. +3 dB (level 1) over 120 degrees.
+    pure function dBToAngle(dB: float) -> angle {
+        return -60deg + (dB + 20) / 23 * 120deg;
+    }
+    pure function needleAngle() -> angle {
+        return root.dBToAngle(clamp(root.level, 0.0, 1.0) * 23 - 20);
+    }
+    pure function tickX(dB: float) -> length {
+        return root.cx + sin(root.dBToAngle(dB)) * root.r-scale;
+    }
+    pure function tickY(dB: float) -> length {
+        return root.cy - cos(root.dBToAngle(dB)) * root.r-scale;
+    }
+    pure function tickInnerX(dB: float) -> length {
+        return root.cx + sin(root.dBToAngle(dB)) * (dB == -20 || dB == -10 || dB == -5 || dB == 0 || dB == 3 ? root.r-major-in : root.r-minor-in);
+    }
+    pure function tickInnerY(dB: float) -> length {
+        return root.cy - cos(root.dBToAngle(dB)) * (dB == -20 || dB == -10 || dB == -5 || dB == 0 || dB == 3 ? root.r-major-in : root.r-minor-in);
+    }
+    pure function labelX(dB: float) -> length {
+        return root.cx + sin(root.dBToAngle(dB)) * root.r-label;
+    }
+    pure function labelY(dB: float) -> length {
+        return root.cy - cos(root.dBToAngle(dB)) * root.r-label;
+    }
+    pure function ptX(r: length) -> length {
+        return root.cx + sin(root.needleAngle()) * r;
+    }
+    pure function ptY(r: length) -> length {
+        return root.cy - cos(root.needleAngle()) * r;
+    }
+    pure function line(x1: length, y1: length, x2: length, y2: length) -> string {
+        return "M " + x1 / 1px + " " + y1 / 1px + " L " + x2 / 1px + " " + y2 / 1px;
+    }
+
+    // Bezel
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: 14px;
+        background: #121214;
+        border-width: 1px;
+        border-color: rgba(157, 78, 221, 0.25);
+    }
+
+    // Inner face ("glass")
+    Rectangle {
+        x: 5px;
+        y: 5px;
+        width: parent.width - 10px;
+        height: parent.height - 10px;
+        border-radius: 10px;
+        background: #1A1A22;
+        clip: true;
+
+        // Glass highlight
+        Rectangle {
+            width: parent.width;
+            height: parent.height * 0.5;
+            background: @linear-gradient(180deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.0) 100%);
+        }
+
+        // Scale arc
+        Path {
+            x: 0px;
+            y: 0px;
+            width: 250px;
+            height: 160px;
+            viewbox-width: 250;
+            viewbox-height: 160;
+            commands: "M 1.2 73.5 A 143 143 0 0 1 248.8 73.5";
+            stroke: #2A2A32;
+            stroke-width: 2px;
+        }
+
+        // Red zone arc (+1 .. +3 dB)
+        Path {
+            x: 0px;
+            y: 0px;
+            width: 250px;
+            height: 160px;
+            viewbox-width: 250;
+            viewbox-height: 160;
+            commands: "M 224.0 60.8 A 130 130 0 0 1 237.6 80";
+            stroke: #EF5350;
+            stroke-width: 5px;
+            stroke-line-cap: round;
+        }
+
+        // Ticks: -20 -15 -10 -7 -5 -3 -2 -1 0 +1 +2 +3 (red above 0 dB)
+        for t in [-20, -15, -10, -7, -5, -3, -2, -1, 0, 1, 2, 3]: Path {
+            x: 0px;
+            y: 0px;
+            width: 250px;
+            height: 160px;
+            viewbox-width: 250;
+            viewbox-height: 160;
+            commands: root.line(root.tickX(t), root.tickY(t), root.tickInnerX(t), root.tickInnerY(t));
+            stroke: t >= 1 ? #EF5350 : #D8D8E0;
+            stroke-width: t == -20 || t == -10 || t == -5 || t == 0 || t == 3 ? 3px : 2px;
+            stroke-line-cap: round;
+        }
+
+        // Scale labels
+        Text {
+            x: root.labelX(-20) - self.width / 2;
+            y: root.labelY(-20) - self.height / 2;
+            width: 30px;
+            height: 12px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            text: "-20";
+            font-size: 9px;
+            color: #C0C0D0;
+        }
+        Text {
+            x: root.labelX(-10) - self.width / 2;
+            y: root.labelY(-10) - self.height / 2;
+            width: 30px;
+            height: 12px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            text: "-10";
+            font-size: 9px;
+            color: #C0C0D0;
+        }
+        Text {
+            x: root.labelX(-5) - self.width / 2;
+            y: root.labelY(-5) - self.height / 2;
+            width: 30px;
+            height: 12px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            text: "-5";
+            font-size: 9px;
+            color: #C0C0D0;
+        }
+        Text {
+            x: root.labelX(0) - self.width / 2;
+            y: root.labelY(0) - self.height / 2;
+            width: 30px;
+            height: 12px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            text: "0";
+            font-size: 10px;
+            font-weight: 700;
+            color: #E8E8F0;
+        }
+        Text {
+            x: root.labelX(3) - self.width / 2;
+            y: root.labelY(3) - self.height / 2;
+            width: 30px;
+            height: 12px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            text: "+3";
+            font-size: 9px;
+            font-weight: 700;
+            color: #EF5350;
+        }
+
+        // "dB" indicator
+        Text {
+            x: root.cx - 10px;
+            y: 10px;
+            width: 20px;
+            height: 10px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            text: "dB";
+            font-size: 8px;
+            color: #6A6A78;
+        }
+
+        // Needle: computed Path (transform-rotation is a no-op in the software
+        // renderer, so the geometry follows the angle directly).
+        Path { // body
+            x: 0px;
+            y: 0px;
+            width: 250px;
+            height: 160px;
+            viewbox-width: 250;
+            viewbox-height: 160;
+            commands: root.line(root.ptX(118px), root.ptY(118px), root.ptX(6px), root.ptY(6px));
+            stroke: #C8C8D0;
+            stroke-width: 4px;
+            stroke-line-cap: round;
+        }
+        Path { // red tip
+            x: 0px;
+            y: 0px;
+            width: 250px;
+            height: 160px;
+            viewbox-width: 250;
+            viewbox-height: 160;
+            commands: root.line(root.ptX(141px), root.ptY(141px), root.ptX(118px), root.ptY(118px));
+            stroke: #EF5350;
+            stroke-width: 4px;
+            stroke-line-cap: round;
+        }
+        Path { // counterweight (tail below the pivot)
+            x: 0px;
+            y: 0px;
+            width: 250px;
+            height: 160px;
+            viewbox-width: 250;
+            viewbox-height: 160;
+            commands: root.line(root.ptX(-17px), root.ptY(-17px), root.cx, root.cy);
+            stroke: #EF5350;
+            stroke-width: 3px;
+            stroke-line-cap: round;
+        }
+
+        // Pivot hub
+        Rectangle {
+            x: root.cx - 6px;
+            y: root.cy - 6px;
+            width: 12px;
+            height: 12px;
+            border-radius: self.width / 2;
+            background: #0E0E12;
+            border-width: 2px;
+            border-color: #9D4EDD;
+        }
+
+        // "VU" label
+        Text {
+            x: root.cx - 12px;
+            y: 126px;
+            width: 24px;
+            height: 10px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            text: "VU";
+            font-size: 10px;
+            font-weight: 700;
+            color: #C77DFF;
+        }
+    }
+}
