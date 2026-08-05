@@ -41,6 +41,9 @@ pub struct PreVocalParams {
     #[id = "hpf"]
     pub hpf: FloatParam,
 
+    #[id = "lpf"]
+    pub lpf: FloatParam,
+
     #[id = "air"]
     pub air: FloatParam,
 
@@ -85,6 +88,19 @@ impl Default for PreVocalParams {
                     min: 20.0,
                     max: 200.0,
                     factor: FloatRange::skew_factor(20.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(100.0))
+            .with_unit(" Hz")
+            .with_value_to_string(formatters::v2s_f32_rounded(0)),
+
+            lpf: FloatParam::new(
+                "LPF",
+                20_000.0,
+                FloatRange::Skewed {
+                    min: 500.0,
+                    max: 20_000.0,
+                    factor: FloatRange::skew_factor(2000.0),
                 },
             )
             .with_smoother(SmoothingStyle::Linear(100.0))
@@ -202,7 +218,7 @@ impl Plugin for PreVocal {
 
 impl ClapPlugin for PreVocal {
     const CLAP_ID: &'static str = "com.prevocal.prevocal";
-    const CLAP_DESCRIPTION: Option<&'static str> = Some("Vocal Bus Preamp with soft saturation, HPF and air boost.");
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("Vocal Bus Preamp with soft saturation, HPF/LPF and air boost.");
     const CLAP_MANUAL_URL: Option<&'static str> = Some(Self::URL);
     const CLAP_SUPPORT_URL: Option<&'static str> = Some(Self::URL);
     const CLAP_FEATURES: &'static [ClapFeature] = &[
@@ -257,10 +273,11 @@ impl BiquadState {
     }
 }
 
-/// Per-channel filter state grouping the HPF and Air high-shelf biquads.
+/// Per-channel filter state grouping the HPF, LPF and Air high-shelf biquads.
 #[derive(Clone, Copy, Default)]
 pub struct ChannelFilter {
     pub hpf: BiquadState,
+    pub lpf: BiquadState,
     pub air: BiquadState,
 }
 
@@ -274,6 +291,29 @@ pub fn butterworth_2p_highpass_coeffs(freq: f32, sample_rate: f32) -> BiquadCoef
     let b0 = (1.0 + cos_omega) / 2.0;
     let b1 = -(1.0 + cos_omega);
     let b2 = (1.0 + cos_omega) / 2.0;
+    let a0 = 1.0 + alpha;
+    let a1 = -2.0 * cos_omega;
+    let a2 = 1.0 - alpha;
+
+    BiquadCoeffs {
+        b0: b0 / a0,
+        b1: b1 / a0,
+        b2: b2 / a0,
+        a1: a1 / a0,
+        a2: a2 / a0,
+    }
+}
+
+/// Coefficients for a 2nd order Butterworth low-pass (12 dB/oct), derived from an
+/// RBJ audio EQ cookbook bilinear transform.
+pub fn butterworth_2p_lowpass_coeffs(freq: f32, sample_rate: f32) -> BiquadCoeffs {
+    let omega = 2.0 * std::f32::consts::PI * freq / sample_rate;
+    let alpha = (omega / 2.0).sin() / (2.0_f32).sqrt();
+    let cos_omega = omega.cos();
+
+    let b0 = (1.0 - cos_omega) / 2.0;
+    let b1 = 1.0 - cos_omega;
+    let b2 = (1.0 - cos_omega) / 2.0;
     let a0 = 1.0 + alpha;
     let a1 = -2.0 * cos_omega;
     let a2 = 1.0 - alpha;
@@ -316,7 +356,7 @@ pub fn highshelf_2p_coeffs(freq: f32, db_gain: f32, sample_rate: f32) -> BiquadC
 
 /// Process a single sample through the complete PreVocal chain:
 ///
-/// `input -> Drive (tanh) -> HPF -> Air (high-shelf) -> Output Trim -> Phase Flip`
+/// `input -> Drive (tanh) -> HPF -> LPF -> Air (high-shelf) -> Output Trim -> Phase Flip`
 #[allow(clippy::too_many_arguments)]
 pub fn process_sample(
     input: f32,
@@ -325,13 +365,16 @@ pub fn process_sample(
     trim: f32,
     hpf: &BiquadCoeffs,
     hpf_state: &mut BiquadState,
+    lpf: &BiquadCoeffs,
+    lpf_state: &mut BiquadState,
     air: &BiquadCoeffs,
     air_state: &mut BiquadState,
 ) -> f32 {
     let mut x = input * drive;
     x = x.tanh();
     let y = hpf_state.process(x, hpf);
-    let z = air_state.process(y, air);
+    let w = lpf_state.process(y, lpf);
+    let z = air_state.process(w, air);
     let mut out = z * trim;
     if phase_invert {
         out = -out;
@@ -352,6 +395,7 @@ pub struct PreVocalDsp {
 struct BlockParams {
     drive: f32,
     hpf_freq: f32,
+    lpf_freq: f32,
     air_db: f32,
     phase_invert: bool,
     trim: f32,
@@ -394,15 +438,17 @@ impl PreVocalDsp {
         Some(BlockParams {
             drive: self.params.drive.smoothed.next_step(steps),
             hpf_freq: self.params.hpf.smoothed.next_step(steps),
+            lpf_freq: self.params.lpf.smoothed.next_step(steps),
             air_db: self.params.air.smoothed.next_step(steps),
             phase_invert: self.params.phase_flip.modulated_plain_value(),
             trim: self.params.output_trim.smoothed.next_step(steps),
         })
     }
 
-    fn coeffs_for(&self, p: &BlockParams) -> (BiquadCoeffs, BiquadCoeffs) {
+    fn coeffs_for(&self, p: &BlockParams) -> (BiquadCoeffs, BiquadCoeffs, BiquadCoeffs) {
         (
             butterworth_2p_highpass_coeffs(p.hpf_freq, self.sample_rate),
+            butterworth_2p_lowpass_coeffs(p.lpf_freq, self.sample_rate),
             highshelf_2p_coeffs(10_000.0, p.air_db, self.sample_rate),
         )
     }
@@ -414,10 +460,11 @@ impl PreVocalDsp {
         let Some(p) = self.block_params(num_frames) else {
             return;
         };
-        let (hpf_coeffs, air_coeffs) = self.coeffs_for(&p);
+        let (hpf_coeffs, lpf_coeffs, air_coeffs) = self.coeffs_for(&p);
 
         for (channel, samples) in channels.iter_mut().enumerate() {
             let mut hpf = self.filter_states[channel].hpf;
+            let mut lpf = self.filter_states[channel].lpf;
             let mut air = self.filter_states[channel].air;
             for sample in samples.iter_mut() {
                 *sample = process_sample(
@@ -427,11 +474,13 @@ impl PreVocalDsp {
                     p.trim,
                     &hpf_coeffs,
                     &mut hpf,
+                    &lpf_coeffs,
+                    &mut lpf,
                     &air_coeffs,
                     &mut air,
                 );
             }
-            self.filter_states[channel] = ChannelFilter { hpf, air };
+            self.filter_states[channel] = ChannelFilter { hpf, lpf, air };
         }
     }
 
@@ -442,12 +491,13 @@ impl PreVocalDsp {
         let Some(p) = self.block_params(num_frames) else {
             return;
         };
-        let (hpf_coeffs, air_coeffs) = self.coeffs_for(&p);
+        let (hpf_coeffs, lpf_coeffs, air_coeffs) = self.coeffs_for(&p);
 
         for frame in 0..num_frames {
             for channel in 0..num_channels {
                 let idx = frame * num_channels + channel;
                 let mut hpf = self.filter_states[channel].hpf;
+                let mut lpf = self.filter_states[channel].lpf;
                 let mut air = self.filter_states[channel].air;
                 samples[idx] = process_sample(
                     samples[idx],
@@ -456,10 +506,12 @@ impl PreVocalDsp {
                     p.trim,
                     &hpf_coeffs,
                     &mut hpf,
+                    &lpf_coeffs,
+                    &mut lpf,
                     &air_coeffs,
                     &mut air,
                 );
-                self.filter_states[channel] = ChannelFilter { hpf, air };
+                self.filter_states[channel] = ChannelFilter { hpf, lpf, air };
             }
         }
     }

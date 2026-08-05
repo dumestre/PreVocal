@@ -130,6 +130,7 @@ impl Drop for SlintEditorInstance {
 fn apply_param_values(ui: &PreVocalUI, params: &PreVocalParams) {
     ui.set_drive(util::gain_to_db(params.drive.modulated_plain_value()));
     ui.set_hpf(params.hpf.modulated_plain_value());
+    ui.set_lpf(params.lpf.modulated_plain_value());
     ui.set_air(params.air.modulated_plain_value());
     ui.set_phase_flip(params.phase_flip.modulated_plain_value());
     ui.set_output_trim(util::gain_to_db(params.output_trim.modulated_plain_value()));
@@ -350,6 +351,16 @@ fn create_editor_ui(
 
     let ctx = Arc::clone(context);
     let p = Arc::clone(params);
+    ui.on_lpf_changed(move |v| {
+        let setter = ParamSetter::new(&*ctx);
+        let hz = v.clamp(500.0, 20_000.0);
+        setter.begin_set_parameter(&p.lpf);
+        setter.set_parameter(&p.lpf, hz);
+        setter.end_set_parameter(&p.lpf);
+    });
+
+    let ctx = Arc::clone(context);
+    let p = Arc::clone(params);
     ui.on_air_changed(move |v| {
         let setter = ParamSetter::new(&*ctx);
         let db = v.clamp(0.0, 6.0);
@@ -546,6 +557,7 @@ impl Editor for SlintEditor {
         push_to_ui(&self.active, move |ui| match id.as_str() {
             "drive" => ui.set_drive(util::gain_to_db(params.drive.modulated_plain_value())),
             "hpf" => ui.set_hpf(params.hpf.modulated_plain_value()),
+            "lpf" => ui.set_lpf(params.lpf.modulated_plain_value()),
             "air" => ui.set_air(params.air.modulated_plain_value()),
             "phase_flip" => ui.set_phase_flip(params.phase_flip.modulated_plain_value()),
             "output_trim" => {
@@ -561,6 +573,7 @@ impl Editor for SlintEditor {
         push_to_ui(&self.active, move |ui| match id.as_str() {
             "drive" => ui.set_drive(util::gain_to_db(params.drive.modulated_plain_value())),
             "hpf" => ui.set_hpf(params.hpf.modulated_plain_value()),
+            "lpf" => ui.set_lpf(params.lpf.modulated_plain_value()),
             "air" => ui.set_air(params.air.modulated_plain_value()),
             "phase_flip" => ui.set_phase_flip(params.phase_flip.modulated_plain_value()),
             "output_trim" => {
