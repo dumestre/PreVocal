@@ -132,7 +132,11 @@ fn apply_param_values(ui: &PreVocalUI, params: &PreVocalParams) {
     ui.set_hpf(params.hpf.modulated_plain_value());
     ui.set_lpf(params.lpf.modulated_plain_value());
     ui.set_air(params.air.modulated_plain_value());
-    ui.set_phase_flip(params.phase_flip.modulated_plain_value());
+    ui.set_comp_thresh(params.comp_thresh.modulated_plain_value());
+    ui.set_comp_ratio(params.comp_ratio.modulated_plain_value());
+    ui.set_comp_attack(params.comp_attack.modulated_plain_value());
+    ui.set_comp_release(params.comp_release.modulated_plain_value());
+    ui.set_comp_makeup(util::gain_to_db(params.comp_makeup.modulated_plain_value()));
     ui.set_output_trim(util::gain_to_db(params.output_trim.modulated_plain_value()));
 }
 
@@ -371,11 +375,52 @@ fn create_editor_ui(
 
     let ctx = Arc::clone(context);
     let p = Arc::clone(params);
-    ui.on_phase_flip_changed(move |v| {
+    ui.on_comp_thresh_changed(move |v| {
         let setter = ParamSetter::new(&*ctx);
-        setter.begin_set_parameter(&p.phase_flip);
-        setter.set_parameter(&p.phase_flip, v);
-        setter.end_set_parameter(&p.phase_flip);
+        let db = v.clamp(-60.0, 0.0);
+        setter.begin_set_parameter(&p.comp_thresh);
+        setter.set_parameter(&p.comp_thresh, db);
+        setter.end_set_parameter(&p.comp_thresh);
+    });
+
+    let ctx = Arc::clone(context);
+    let p = Arc::clone(params);
+    ui.on_comp_ratio_changed(move |v| {
+        let setter = ParamSetter::new(&*ctx);
+        let ratio = v.clamp(1.0, 20.0);
+        setter.begin_set_parameter(&p.comp_ratio);
+        setter.set_parameter(&p.comp_ratio, ratio);
+        setter.end_set_parameter(&p.comp_ratio);
+    });
+
+    let ctx = Arc::clone(context);
+    let p = Arc::clone(params);
+    ui.on_comp_attack_changed(move |v| {
+        let setter = ParamSetter::new(&*ctx);
+        let ms = v.clamp(0.1, 100.0);
+        setter.begin_set_parameter(&p.comp_attack);
+        setter.set_parameter(&p.comp_attack, ms);
+        setter.end_set_parameter(&p.comp_attack);
+    });
+
+    let ctx = Arc::clone(context);
+    let p = Arc::clone(params);
+    ui.on_comp_release_changed(move |v| {
+        let setter = ParamSetter::new(&*ctx);
+        let ms = v.clamp(10.0, 1_000.0);
+        setter.begin_set_parameter(&p.comp_release);
+        setter.set_parameter(&p.comp_release, ms);
+        setter.end_set_parameter(&p.comp_release);
+    });
+
+    let ctx = Arc::clone(context);
+    let p = Arc::clone(params);
+    ui.on_comp_makeup_changed(move |v| {
+        let setter = ParamSetter::new(&*ctx);
+        let gain = util::db_to_gain(v.clamp(0.0, 24.0));
+        setter.begin_set_parameter(&p.comp_makeup);
+        setter.set_parameter(&p.comp_makeup, gain);
+        setter.end_set_parameter(&p.comp_makeup);
     });
 
     let ctx = Arc::clone(context);
@@ -559,7 +604,13 @@ impl Editor for SlintEditor {
             "hpf" => ui.set_hpf(params.hpf.modulated_plain_value()),
             "lpf" => ui.set_lpf(params.lpf.modulated_plain_value()),
             "air" => ui.set_air(params.air.modulated_plain_value()),
-            "phase_flip" => ui.set_phase_flip(params.phase_flip.modulated_plain_value()),
+            "comp_thresh" => ui.set_comp_thresh(params.comp_thresh.modulated_plain_value()),
+            "comp_ratio" => ui.set_comp_ratio(params.comp_ratio.modulated_plain_value()),
+            "comp_attack" => ui.set_comp_attack(params.comp_attack.modulated_plain_value()),
+            "comp_release" => ui.set_comp_release(params.comp_release.modulated_plain_value()),
+            "comp_makeup" => {
+                ui.set_comp_makeup(util::gain_to_db(params.comp_makeup.modulated_plain_value()))
+            }
             "output_trim" => {
                 ui.set_output_trim(util::gain_to_db(params.output_trim.modulated_plain_value()))
             }
@@ -575,7 +626,13 @@ impl Editor for SlintEditor {
             "hpf" => ui.set_hpf(params.hpf.modulated_plain_value()),
             "lpf" => ui.set_lpf(params.lpf.modulated_plain_value()),
             "air" => ui.set_air(params.air.modulated_plain_value()),
-            "phase_flip" => ui.set_phase_flip(params.phase_flip.modulated_plain_value()),
+            "comp_thresh" => ui.set_comp_thresh(params.comp_thresh.modulated_plain_value()),
+            "comp_ratio" => ui.set_comp_ratio(params.comp_ratio.modulated_plain_value()),
+            "comp_attack" => ui.set_comp_attack(params.comp_attack.modulated_plain_value()),
+            "comp_release" => ui.set_comp_release(params.comp_release.modulated_plain_value()),
+            "comp_makeup" => {
+                ui.set_comp_makeup(util::gain_to_db(params.comp_makeup.modulated_plain_value()))
+            }
             "output_trim" => {
                 ui.set_output_trim(util::gain_to_db(params.output_trim.modulated_plain_value()))
             }

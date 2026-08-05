@@ -27,7 +27,10 @@ fn set_panic_hook() {
     }));
 }
 
+mod comp;
 mod editor;
+
+use comp::{CompressorCoefs, CompressorState};
 
 pub struct PreVocal {
     dsp: PreVocalDsp,
@@ -47,8 +50,20 @@ pub struct PreVocalParams {
     #[id = "air"]
     pub air: FloatParam,
 
-    #[id = "phase_flip"]
-    pub phase_flip: BoolParam,
+    #[id = "comp_thresh"]
+    pub comp_thresh: FloatParam,
+
+    #[id = "comp_ratio"]
+    pub comp_ratio: FloatParam,
+
+    #[id = "comp_attack"]
+    pub comp_attack: FloatParam,
+
+    #[id = "comp_release"]
+    pub comp_release: FloatParam,
+
+    #[id = "comp_makeup"]
+    pub comp_makeup: FloatParam,
 
     #[id = "output_trim"]
     pub output_trim: FloatParam,
@@ -116,7 +131,66 @@ impl Default for PreVocalParams {
             .with_unit(" dB")
             .with_value_to_string(formatters::v2s_f32_rounded(1)),
 
-            phase_flip: BoolParam::new("Phase Flip", false),
+            comp_thresh: FloatParam::new(
+                "Comp Threshold",
+                -18.0,
+                FloatRange::Skewed {
+                    min: -60.0,
+                    max: 0.0,
+                    factor: FloatRange::skew_factor(-20.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_rounded(1)),
+
+            comp_ratio: FloatParam::new(
+                "Comp Ratio",
+                3.0,
+                FloatRange::Linear { min: 1.0, max: 20.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(1)),
+
+            comp_attack: FloatParam::new(
+                "Comp Attack",
+                5.0,
+                FloatRange::Skewed {
+                    min: 0.1,
+                    max: 100.0,
+                    factor: FloatRange::skew_factor(5.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" ms")
+            .with_value_to_string(formatters::v2s_f32_rounded(1)),
+
+            comp_release: FloatParam::new(
+                "Comp Release",
+                100.0,
+                FloatRange::Skewed {
+                    min: 10.0,
+                    max: 1_000.0,
+                    factor: FloatRange::skew_factor(100.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" ms")
+            .with_value_to_string(formatters::v2s_f32_rounded(1)),
+
+            comp_makeup: FloatParam::new(
+                "Comp Makeup",
+                util::db_to_gain(0.0),
+                FloatRange::Skewed {
+                    min: util::db_to_gain(0.0),
+                    max: util::db_to_gain(24.0),
+                    factor: FloatRange::gain_skew_factor(0.0, 24.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Logarithmic(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 
             output_trim: FloatParam::new(
                 "Output Trim",
@@ -218,7 +292,7 @@ impl Plugin for PreVocal {
 
 impl ClapPlugin for PreVocal {
     const CLAP_ID: &'static str = "com.prevocal.prevocal";
-    const CLAP_DESCRIPTION: Option<&'static str> = Some("Vocal Bus Preamp with soft saturation, HPF/LPF and air boost.");
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("Vocal Bus Preamp with soft saturation, HPF/LPF, air boost and compressor.");
     const CLAP_MANUAL_URL: Option<&'static str> = Some(Self::URL);
     const CLAP_SUPPORT_URL: Option<&'static str> = Some(Self::URL);
     const CLAP_FEATURES: &'static [ClapFeature] = &[
@@ -273,12 +347,14 @@ impl BiquadState {
     }
 }
 
-/// Per-channel filter state grouping the HPF, LPF and Air high-shelf biquads.
+/// Per-channel filter state grouping the HPF, LPF, Air high-shelf biquads and
+/// the compressor envelope.
 #[derive(Clone, Copy, Default)]
 pub struct ChannelFilter {
     pub hpf: BiquadState,
     pub lpf: BiquadState,
     pub air: BiquadState,
+    pub comp: CompressorState,
 }
 
 /// Coefficients for a 2nd order Butterworth high-pass (12 dB/oct), derived from an
@@ -356,12 +432,11 @@ pub fn highshelf_2p_coeffs(freq: f32, db_gain: f32, sample_rate: f32) -> BiquadC
 
 /// Process a single sample through the complete PreVocal chain:
 ///
-/// `input -> Drive (tanh) -> HPF -> LPF -> Air (high-shelf) -> Output Trim -> Phase Flip`
+/// `input -> Drive (tanh) -> HPF -> LPF -> Air (high-shelf) -> Compressor -> Output Trim`
 #[allow(clippy::too_many_arguments)]
 pub fn process_sample(
     input: f32,
     drive: f32,
-    phase_invert: bool,
     trim: f32,
     hpf: &BiquadCoeffs,
     hpf_state: &mut BiquadState,
@@ -369,17 +444,16 @@ pub fn process_sample(
     lpf_state: &mut BiquadState,
     air: &BiquadCoeffs,
     air_state: &mut BiquadState,
+    comp: &CompressorCoefs,
+    comp_state: &mut CompressorState,
 ) -> f32 {
     let mut x = input * drive;
     x = x.tanh();
     let y = hpf_state.process(x, hpf);
     let w = lpf_state.process(y, lpf);
     let z = air_state.process(w, air);
-    let mut out = z * trim;
-    if phase_invert {
-        out = -out;
-    }
-    out
+    let c = comp_state.process(z, comp);
+    c * trim
 }
 
 /// Shared realtime DSP engine. Used by both the plugin and the standalone binary so the
@@ -397,7 +471,11 @@ struct BlockParams {
     hpf_freq: f32,
     lpf_freq: f32,
     air_db: f32,
-    phase_invert: bool,
+    comp_thresh_db: f32,
+    comp_ratio: f32,
+    comp_attack_ms: f32,
+    comp_release_ms: f32,
+    comp_makeup_db: f32,
     trim: f32,
 }
 
@@ -440,7 +518,11 @@ impl PreVocalDsp {
             hpf_freq: self.params.hpf.smoothed.next_step(steps),
             lpf_freq: self.params.lpf.smoothed.next_step(steps),
             air_db: self.params.air.smoothed.next_step(steps),
-            phase_invert: self.params.phase_flip.modulated_plain_value(),
+            comp_thresh_db: self.params.comp_thresh.smoothed.next_step(steps),
+            comp_ratio: self.params.comp_ratio.smoothed.next_step(steps),
+            comp_attack_ms: self.params.comp_attack.smoothed.next_step(steps),
+            comp_release_ms: self.params.comp_release.smoothed.next_step(steps),
+            comp_makeup_db: util::gain_to_db(self.params.comp_makeup.smoothed.next_step(steps)),
             trim: self.params.output_trim.smoothed.next_step(steps),
         })
     }
@@ -453,6 +535,17 @@ impl PreVocalDsp {
         )
     }
 
+    fn comp_coefs(&self, p: &BlockParams) -> CompressorCoefs {
+        CompressorCoefs::new(
+            p.comp_attack_ms,
+            p.comp_release_ms,
+            p.comp_thresh_db,
+            p.comp_ratio,
+            p.comp_makeup_db,
+            self.sample_rate,
+        )
+    }
+
     /// Process one block of audio across all channels. Parameters are read from the shared
     /// [`Arc<PreVocalParams>`] once per block, so the smoothers advance in a consistent way.
     pub fn process_block(&mut self, channels: &mut [&mut [f32]]) {
@@ -461,16 +554,17 @@ impl PreVocalDsp {
             return;
         };
         let (hpf_coeffs, lpf_coeffs, air_coeffs) = self.coeffs_for(&p);
+        let comp_coefs = self.comp_coefs(&p);
 
         for (channel, samples) in channels.iter_mut().enumerate() {
             let mut hpf = self.filter_states[channel].hpf;
             let mut lpf = self.filter_states[channel].lpf;
             let mut air = self.filter_states[channel].air;
+            let mut comp = self.filter_states[channel].comp;
             for sample in samples.iter_mut() {
                 *sample = process_sample(
                     *sample,
                     p.drive,
-                    p.phase_invert,
                     p.trim,
                     &hpf_coeffs,
                     &mut hpf,
@@ -478,9 +572,11 @@ impl PreVocalDsp {
                     &mut lpf,
                     &air_coeffs,
                     &mut air,
+                    &comp_coefs,
+                    &mut comp,
                 );
             }
-            self.filter_states[channel] = ChannelFilter { hpf, lpf, air };
+            self.filter_states[channel] = ChannelFilter { hpf, lpf, air, comp };
         }
     }
 
@@ -492,6 +588,7 @@ impl PreVocalDsp {
             return;
         };
         let (hpf_coeffs, lpf_coeffs, air_coeffs) = self.coeffs_for(&p);
+        let comp_coefs = self.comp_coefs(&p);
 
         for frame in 0..num_frames {
             for channel in 0..num_channels {
@@ -499,10 +596,10 @@ impl PreVocalDsp {
                 let mut hpf = self.filter_states[channel].hpf;
                 let mut lpf = self.filter_states[channel].lpf;
                 let mut air = self.filter_states[channel].air;
+                let mut comp = self.filter_states[channel].comp;
                 samples[idx] = process_sample(
                     samples[idx],
                     p.drive,
-                    p.phase_invert,
                     p.trim,
                     &hpf_coeffs,
                     &mut hpf,
@@ -510,8 +607,10 @@ impl PreVocalDsp {
                     &mut lpf,
                     &air_coeffs,
                     &mut air,
+                    &comp_coefs,
+                    &mut comp,
                 );
-                self.filter_states[channel] = ChannelFilter { hpf, lpf, air };
+                self.filter_states[channel] = ChannelFilter { hpf, lpf, air, comp };
             }
         }
     }

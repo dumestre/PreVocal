@@ -5,55 +5,6 @@ import { ComboBox } from "std-widgets.slint";
 import { ControlKnob } from "knob.slint";
 import { VerticalFader } from "fader.slint";
 
-component PhaseToggle inherits Rectangle {
-    in-out property <bool> checked: false;
-    callback toggled(bool);
-
-    width: 150px;
-    height: 52px;
-
-    Rectangle {
-        width: parent.width;
-        height: parent.height;
-        border-radius: 14px;
-        background: root.checked ? #3C096C : #1E1E24;
-        border-width: 2px;
-        border-color: root.checked ? #9D4EDD : rgba(157, 78, 221, 0.3);
-    }
-
-    // LED indicator
-    Rectangle {
-        width: 10px;
-        height: 10px;
-        x: 16px;
-        y: (parent.height - self.height) / 2;
-        border-radius: self.width / 2;
-        background: root.checked ? #C77DFF : #3C096C;
-        drop-shadow-blur: root.checked ? 8px : 0px;
-        drop-shadow-color: #9D4EDD;
-        drop-shadow-offset-x: 0px;
-        drop-shadow-offset-y: 0px;
-    }
-
-    Text {
-        x: 36px;
-        y: (parent.height - self.height) / 2;
-        text: root.checked ? "PHASE 180°" : "PHASE 0°";
-        color: root.checked ? #FFFFFF : #A0A0B0;
-        font-size: 14px;
-        font-weight: 600;
-    }
-
-    TouchArea {
-        width: parent.width;
-        height: parent.height;
-        clicked => {
-            root.checked = !root.checked;
-            root.toggled(root.checked);
-        }
-    }
-}
-
 component LevelMeter inherits Rectangle {
     in-out property <float> level: 0.0;
     in-out property <float> peak: 0.0;
@@ -129,8 +80,12 @@ export component PreVocalUI inherits Window {
     in-out property <float> hpf: 20.0;
     in-out property <float> lpf: 20000.0;
     in-out property <float> air: 0.0;
+    in-out property <float> comp-thresh: -18.0;
+    in-out property <float> comp-ratio: 3.0;
+    in-out property <float> comp-attack: 5.0;
+    in-out property <float> comp-release: 100.0;
+    in-out property <float> comp-makeup: 0.0;
     in-out property <float> output-trim: 0.0;
-    in-out property <bool> phase-flip: false;
     in-out property <float> input-level: 0.0;
     in-out property <float> output-level: 0.0;
     in-out property <float> input-peak: 0.0;
@@ -150,8 +105,12 @@ export component PreVocalUI inherits Window {
     callback hpf-changed(float);
     callback lpf-changed(float);
     callback air-changed(float);
+    callback comp-thresh-changed(float);
+    callback comp-ratio-changed(float);
+    callback comp-attack-changed(float);
+    callback comp-release-changed(float);
+    callback comp-makeup-changed(float);
     callback output-trim-changed(float);
-    callback phase-flip-changed(bool);
     callback driver-selected(string);
     callback input-selected(string);
     callback output-selected(string);
@@ -166,6 +125,18 @@ export component PreVocalUI inherits Window {
             return v + " kHz";
         }
         return round(f) + " Hz";
+    }
+
+    pure function formatDb(v: float) -> string {
+        return round(v * 10.0) / 10.0 + " dB";
+    }
+
+    pure function formatMs(v: float) -> string {
+        return round(v * 10.0) / 10.0 + " ms";
+    }
+
+    pure function ratioLabel(r: float) -> string {
+        return round(r * 10.0) / 10.0 + " :1";
     }
 
     VerticalLayout {
@@ -483,22 +454,6 @@ export component PreVocalUI inherits Window {
                     cross-axis-alignment: CrossAxisAlignment.center;
                     horizontal-stretch: 1;
 
-                    Text { text: "TRIM"; font-size: 13px; color: #A0A0B0; }
-                    VerticalFader {
-                        minimum: -12.0;
-                        maximum: 12.0;
-                        value <=> root.output-trim;
-                        changed(v) => { root.output-trim-changed(v); }
-                    }
-                    Text { text: root.output-trim + " dB"; font-size: 14px; color: #C77DFF; }
-                }
-
-                VerticalLayout {
-                    spacing: 16px;
-                    alignment: center;
-                    cross-axis-alignment: CrossAxisAlignment.center;
-                    horizontal-stretch: 1;
-
                     Text { text: "HPF"; font-size: 13px; color: #A0A0B0; }
                     ControlKnob {
                         minimum: 20.0;
@@ -537,10 +492,11 @@ export component PreVocalUI inherits Window {
                     ControlKnob {
                         minimum: 0.0;
                         maximum: 6.0;
+                        default-value: 0.0;
                         value <=> root.air;
                         changed(v) => { root.air-changed(v); }
                     }
-                    Text { text: root.air; font-size: 14px; color: #C77DFF; }
+                    Text { text: root.air + " dB"; font-size: 14px; color: #C77DFF; }
                 }
 
                 VerticalLayout {
@@ -549,11 +505,14 @@ export component PreVocalUI inherits Window {
                     cross-axis-alignment: CrossAxisAlignment.center;
                     horizontal-stretch: 1;
 
-                    PhaseToggle {
-                        checked <=> root.phase-flip;
-                        toggled(v) => { root.phase-flip-changed(v); }
+                    Text { text: "TRIM"; font-size: 13px; color: #A0A0B0; }
+                    VerticalFader {
+                        minimum: -12.0;
+                        maximum: 12.0;
+                        value <=> root.output-trim;
+                        changed(v) => { root.output-trim-changed(v); }
                     }
-                    Text { text: "PHASE FLIP"; font-size: 13px; color: #A0A0B0; }
+                    Text { text: root.output-trim + " dB"; font-size: 14px; color: #C77DFF; }
                 }
 
                 // Output meter (right)
@@ -568,6 +527,105 @@ export component PreVocalUI inherits Window {
                     }
                     Text { text: "OUT"; font-size: 11px; color: #A0A0B0; }
                 }
+                }
+
+                // Compressor section
+                VerticalLayout {
+                    spacing: 12px;
+                    alignment: center;
+
+                    Text {
+                        text: "COMPRESSOR";
+                        font-size: 11px;
+                        color: #A0A0B0;
+                        horizontal-alignment: TextHorizontalAlignment.center;
+                        letter-spacing: 3px;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 30px;
+                        alignment: LayoutAlignment.center;
+
+                        VerticalLayout {
+                            spacing: 10px;
+                            alignment: center;
+                            cross-axis-alignment: CrossAxisAlignment.center;
+
+                            Text { text: "THRESH"; font-size: 12px; color: #A0A0B0; }
+                            ControlKnob {
+                                minimum: -60.0;
+                                maximum: 0.0;
+                                default-value: -18.0;
+                                value <=> root.comp-thresh;
+                                changed(v) => { root.comp-thresh-changed(v); }
+                            }
+                            Text { text: root.formatDb(root.comp-thresh); font-size: 13px; color: #C77DFF; }
+                        }
+
+                        VerticalLayout {
+                            spacing: 10px;
+                            alignment: center;
+                            cross-axis-alignment: CrossAxisAlignment.center;
+
+                            Text { text: "RATIO"; font-size: 12px; color: #A0A0B0; }
+                            ControlKnob {
+                                minimum: 1.0;
+                                maximum: 20.0;
+                                default-value: 3.0;
+                                value <=> root.comp-ratio;
+                                changed(v) => { root.comp-ratio-changed(v); }
+                            }
+                            Text { text: root.ratioLabel(root.comp-ratio); font-size: 13px; color: #C77DFF; }
+                        }
+
+                        VerticalLayout {
+                            spacing: 10px;
+                            alignment: center;
+                            cross-axis-alignment: CrossAxisAlignment.center;
+
+                            Text { text: "ATTACK"; font-size: 12px; color: #A0A0B0; }
+                            ControlKnob {
+                                minimum: 0.1;
+                                maximum: 100.0;
+                                default-value: 5.0;
+                                value <=> root.comp-attack;
+                                changed(v) => { root.comp-attack-changed(v); }
+                            }
+                            Text { text: root.formatMs(root.comp-attack); font-size: 13px; color: #C77DFF; }
+                        }
+
+                        VerticalLayout {
+                            spacing: 10px;
+                            alignment: center;
+                            cross-axis-alignment: CrossAxisAlignment.center;
+
+                            Text { text: "RELEASE"; font-size: 12px; color: #A0A0B0; }
+                            ControlKnob {
+                                minimum: 10.0;
+                                maximum: 1000.0;
+                                default-value: 100.0;
+                                value <=> root.comp-release;
+                                changed(v) => { root.comp-release-changed(v); }
+                            }
+                            Text { text: root.formatMs(root.comp-release); font-size: 13px; color: #C77DFF; }
+                        }
+
+                        VerticalLayout {
+                            spacing: 10px;
+                            alignment: center;
+                            cross-axis-alignment: CrossAxisAlignment.center;
+
+                            Text { text: "MAKEUP"; font-size: 12px; color: #A0A0B0; }
+                            ControlKnob {
+                                minimum: 0.0;
+                                maximum: 24.0;
+                                default-value: 0.0;
+                                value <=> root.comp-makeup;
+                                changed(v) => { root.comp-makeup-changed(v); }
+                            }
+                            Text { text: root.formatDb(root.comp-makeup); font-size: 13px; color: #C77DFF; }
+                        }
+                    }
                 }
             }
         }

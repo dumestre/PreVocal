@@ -67,7 +67,25 @@ impl UiBridge {
                 .hpf
                 ._internal_update_smoother(sample_rate, false);
             self.params
+                .lpf
+                ._internal_update_smoother(sample_rate, false);
+            self.params
                 .air
+                ._internal_update_smoother(sample_rate, false);
+            self.params
+                .comp_thresh
+                ._internal_update_smoother(sample_rate, false);
+            self.params
+                .comp_ratio
+                ._internal_update_smoother(sample_rate, false);
+            self.params
+                .comp_attack
+                ._internal_update_smoother(sample_rate, false);
+            self.params
+                .comp_release
+                ._internal_update_smoother(sample_rate, false);
+            self.params
+                .comp_makeup
                 ._internal_update_smoother(sample_rate, false);
             self.params
                 .output_trim
@@ -99,6 +117,17 @@ impl UiBridge {
         self.update_smoothers();
     }
 
+    fn write_lpf(&self, hz: f32) {
+        let hz = hz.clamp(500.0, 20_000.0);
+        if !hz.is_finite() {
+            return;
+        }
+        unsafe {
+            self.params.lpf._internal_set_plain_value(hz);
+        }
+        self.update_smoothers();
+    }
+
     fn write_air(&self, db: f32) {
         let db = db.clamp(0.0, 6.0);
         if !db.is_finite() {
@@ -110,9 +139,58 @@ impl UiBridge {
         self.update_smoothers();
     }
 
-    fn write_phase(&self, enabled: bool) {
+    fn write_comp_thresh(&self, db: f32) {
+        let db = db.clamp(-60.0, 0.0);
+        if !db.is_finite() {
+            return;
+        }
         unsafe {
-            self.params.phase_flip._internal_set_plain_value(enabled);
+            self.params.comp_thresh._internal_set_plain_value(db);
+        }
+        self.update_smoothers();
+    }
+
+    fn write_comp_ratio(&self, ratio: f32) {
+        let ratio = ratio.clamp(1.0, 20.0);
+        if !ratio.is_finite() {
+            return;
+        }
+        unsafe {
+            self.params.comp_ratio._internal_set_plain_value(ratio);
+        }
+        self.update_smoothers();
+    }
+
+    fn write_comp_attack(&self, ms: f32) {
+        let ms = ms.clamp(0.1, 100.0);
+        if !ms.is_finite() {
+            return;
+        }
+        unsafe {
+            self.params.comp_attack._internal_set_plain_value(ms);
+        }
+        self.update_smoothers();
+    }
+
+    fn write_comp_release(&self, ms: f32) {
+        let ms = ms.clamp(10.0, 1_000.0);
+        if !ms.is_finite() {
+            return;
+        }
+        unsafe {
+            self.params.comp_release._internal_set_plain_value(ms);
+        }
+        self.update_smoothers();
+    }
+
+    fn write_comp_makeup(&self, db: f32) {
+        let db = db.clamp(0.0, 24.0);
+        if !db.is_finite() {
+            return;
+        }
+        let gain = util::db_to_gain(db);
+        unsafe {
+            self.params.comp_makeup._internal_set_plain_value(gain);
         }
         self.update_smoothers();
     }
@@ -137,12 +215,32 @@ impl UiBridge {
         self.params.hpf.modulated_plain_value()
     }
 
+    fn lpf_value(&self) -> f32 {
+        self.params.lpf.modulated_plain_value()
+    }
+
     fn air_value(&self) -> f32 {
         self.params.air.modulated_plain_value()
     }
 
-    fn phase_value(&self) -> bool {
-        self.params.phase_flip.modulated_plain_value()
+    fn comp_thresh_value(&self) -> f32 {
+        self.params.comp_thresh.modulated_plain_value()
+    }
+
+    fn comp_ratio_value(&self) -> f32 {
+        self.params.comp_ratio.modulated_plain_value()
+    }
+
+    fn comp_attack_value(&self) -> f32 {
+        self.params.comp_attack.modulated_plain_value()
+    }
+
+    fn comp_release_value(&self) -> f32 {
+        self.params.comp_release.modulated_plain_value()
+    }
+
+    fn comp_makeup_value(&self) -> f32 {
+        util::gain_to_db(self.params.comp_makeup.modulated_plain_value())
     }
 
     fn output_trim_value(&self) -> f32 {
@@ -1073,9 +1171,14 @@ fn run_gui(
 
     ui.set_drive(bridge.drive_value());
     ui.set_hpf(bridge.hpf_value());
+    ui.set_lpf(bridge.lpf_value());
     ui.set_air(bridge.air_value());
+    ui.set_comp_thresh(bridge.comp_thresh_value());
+    ui.set_comp_ratio(bridge.comp_ratio_value());
+    ui.set_comp_attack(bridge.comp_attack_value());
+    ui.set_comp_release(bridge.comp_release_value());
+    ui.set_comp_makeup(bridge.comp_makeup_value());
     ui.set_output_trim(bridge.output_trim_value());
-    ui.set_phase_flip(bridge.phase_value());
 
     {
         let mgr = manager.lock().unwrap();
@@ -1090,14 +1193,29 @@ fn run_gui(
     let bridge_hpf = Arc::clone(&bridge);
     ui.on_hpf_changed(move |v| bridge_hpf.write_hpf(v));
 
+    let bridge_lpf = Arc::clone(&bridge);
+    ui.on_lpf_changed(move |v| bridge_lpf.write_lpf(v));
+
     let bridge_air = Arc::clone(&bridge);
     ui.on_air_changed(move |v| bridge_air.write_air(v));
 
+    let bridge_comp_thresh = Arc::clone(&bridge);
+    ui.on_comp_thresh_changed(move |v| bridge_comp_thresh.write_comp_thresh(v));
+
+    let bridge_comp_ratio = Arc::clone(&bridge);
+    ui.on_comp_ratio_changed(move |v| bridge_comp_ratio.write_comp_ratio(v));
+
+    let bridge_comp_attack = Arc::clone(&bridge);
+    ui.on_comp_attack_changed(move |v| bridge_comp_attack.write_comp_attack(v));
+
+    let bridge_comp_release = Arc::clone(&bridge);
+    ui.on_comp_release_changed(move |v| bridge_comp_release.write_comp_release(v));
+
+    let bridge_comp_makeup = Arc::clone(&bridge);
+    ui.on_comp_makeup_changed(move |v| bridge_comp_makeup.write_comp_makeup(v));
+
     let bridge_trim = Arc::clone(&bridge);
     ui.on_output_trim_changed(move |v| bridge_trim.write_output_trim(v));
-
-    let bridge_phase = Arc::clone(&bridge);
-    ui.on_phase_flip_changed(move |v| bridge_phase.write_phase(v));
 
     // The user picked a driver: repopulate the input/output device lists.
     let mgr_driver = Arc::clone(&manager);
