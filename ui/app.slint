@@ -364,7 +364,7 @@ export component PreVocalUI inherits Window {
                 y: 0;
                 width: parent.width;
                 height: parent.height;
-                source: @image-url("../src/icons/frente.jpg");
+                source: @image-url("../src/icons/frente.png");
                 image-fit: cover;
             }
 
@@ -431,24 +431,28 @@ export component PreVocalUI inherits Window {
 
                 HorizontalLayout {
                     spacing: 20px;
+                    alignment: LayoutAlignment.center;
                     horizontal-stretch: 1;
                     vertical-stretch: 1;
 
                 // Input meter (left)
                 VerticalLayout {
                     spacing: 8px;
-                    alignment: center;
+                    alignment: LayoutAlignment.center;
+                    cross-axis-alignment: CrossAxisAlignment.center;
                     width: 36px;
                     LevelMeter {
                         level: root.input-level;
                         peak: root.input-peak;
                     }
-                    Text { text: "IN"; font-size: 11px; color: #A0A0B0; }
+                    Text { text: "IN"; font-size: 11px;
+                        horizontal-alignment: TextHorizontalAlignment.center; color: #A0A0B0; }
                 }
 
                 VerticalLayout {
                     spacing: 16px;
                     alignment: center;
+                    cross-axis-alignment: CrossAxisAlignment.center;
                     horizontal-stretch: 1;
 
                     Text { text: "DRIVE"; font-size: 13px; color: #A0A0B0; }
@@ -464,9 +468,10 @@ export component PreVocalUI inherits Window {
                 VerticalLayout {
                     spacing: 16px;
                     alignment: center;
+                    cross-axis-alignment: CrossAxisAlignment.center;
                     horizontal-stretch: 1;
 
-                    Text { text: "OUTPUT TRIM"; font-size: 13px; color: #A0A0B0; }
+                    Text { text: "TRIM"; font-size: 13px; color: #A0A0B0; }
                     VerticalFader {
                         minimum: -12.0;
                         maximum: 12.0;
@@ -479,6 +484,7 @@ export component PreVocalUI inherits Window {
                 VerticalLayout {
                     spacing: 16px;
                     alignment: center;
+                    cross-axis-alignment: CrossAxisAlignment.center;
                     horizontal-stretch: 1;
 
                     Text { text: "HPF"; font-size: 13px; color: #A0A0B0; }
@@ -494,6 +500,7 @@ export component PreVocalUI inherits Window {
                 VerticalLayout {
                     spacing: 16px;
                     alignment: center;
+                    cross-axis-alignment: CrossAxisAlignment.center;
                     horizontal-stretch: 1;
 
                     Text { text: "AIR"; font-size: 13px; color: #A0A0B0; }
@@ -509,6 +516,7 @@ export component PreVocalUI inherits Window {
                 VerticalLayout {
                     spacing: 16px;
                     alignment: center;
+                    cross-axis-alignment: CrossAxisAlignment.center;
                     horizontal-stretch: 1;
 
                     PhaseToggle {
@@ -522,6 +530,7 @@ export component PreVocalUI inherits Window {
                 VerticalLayout {
                     spacing: 8px;
                     alignment: center;
+                    cross-axis-alignment: CrossAxisAlignment.center;
                     width: 36px;
                     LevelMeter {
                         level: root.output-level;
