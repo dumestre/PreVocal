@@ -148,7 +148,8 @@ export component PreVocalUI inherits Window {
     VerticalLayout {
         padding: 26px;
         spacing: 20px;
-        alignment: LayoutAlignment.stretch;
+        alignment: LayoutAlignment.center;
+        cross-axis-alignment: CrossAxisAlignment.stretch;
         height: 100%;
 
         // Header
@@ -295,7 +296,7 @@ export component PreVocalUI inherits Window {
                 HorizontalLayout {
                     spacing: 12px;
                     alignment: LayoutAlignment.start;
-                    cross-axis-alignment: center;
+                    cross-axis-alignment: CrossAxisAlignment.center;
 
                     Text {
                         text: "SAÍDA";
@@ -402,6 +403,8 @@ export component PreVocalUI inherits Window {
             HorizontalLayout {
                 padding: 24px;
                 spacing: 20px;
+                alignment: LayoutAlignment.space-between;
+                cross-axis-alignment: CrossAxisAlignment.stretch;
                 height: 100%;
 
                 // Input meter (left edge, full height)
