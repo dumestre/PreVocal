@@ -68,7 +68,7 @@ component LevelMeter inherits Rectangle {
 
 export component PreVocalUI inherits Window {
     preferred-width: 1000px;
-    preferred-height: 640px;
+    preferred-height: 720px;
     title: "PreVocal — Vocal Bus Preamp";
     background: #121214;
     // When embedded in a DAW the host owns the frame: no title bar, no
@@ -85,6 +85,9 @@ export component PreVocalUI inherits Window {
     in-out property <float> comp-attack: 5.0;
     in-out property <float> comp-release: 100.0;
     in-out property <float> comp-makeup: 0.0;
+    in-out property <float> delay-time: 300.0;
+    in-out property <float> delay-feedback: 30.0;
+    in-out property <float> delay-mix: 15.0;
     in-out property <float> output-trim: 0.0;
     in-out property <float> input-level: 0.0;
     in-out property <float> output-level: 0.0;
@@ -110,6 +113,9 @@ export component PreVocalUI inherits Window {
     callback comp-attack-changed(float);
     callback comp-release-changed(float);
     callback comp-makeup-changed(float);
+    callback delay-time-changed(float);
+    callback delay-feedback-changed(float);
+    callback delay-mix-changed(float);
     callback output-trim-changed(float);
     callback driver-selected(string);
     callback input-selected(string);
@@ -403,14 +409,28 @@ export component PreVocalUI inherits Window {
                     alignment: LayoutAlignment.center;
 
                     Image {
-                        width: 120px;
-                        height: 180px;
+                        width: 90px;
+                        height: 130px;
                         image-fit: contain;
                         source: root.drive <= 0.0 ? @image-url("../src/icons/off.png")
                               : root.drive >= 24.0 ? @image-url("../src/icons/100.png")
                               : @image-url("../src/icons/50.png");
                     }
                 }
+
+                // Preamp section: drive, filters, air and output trim
+                VerticalLayout {
+                    spacing: 8px;
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+
+                    Text {
+                        text: "PREAMP";
+                        font-size: 11px;
+                        color: #A0A0B0;
+                        horizontal-alignment: TextHorizontalAlignment.center;
+                        letter-spacing: 3px;
+                    }
 
                 HorizontalLayout {
                     spacing: 20px;
@@ -528,6 +548,7 @@ export component PreVocalUI inherits Window {
                     Text { text: "OUT"; font-size: 11px; color: #A0A0B0; }
                 }
                 }
+                }
 
                 // Compressor section
                 VerticalLayout {
@@ -624,6 +645,73 @@ export component PreVocalUI inherits Window {
                                 changed(v) => { root.comp-makeup-changed(v); }
                             }
                             Text { text: root.formatDb(root.comp-makeup); font-size: 13px; color: #C77DFF; }
+                        }
+                    }
+                }
+
+                // Stereo delay section
+                VerticalLayout {
+                    spacing: 12px;
+                    alignment: center;
+
+                    Text {
+                        text: "DELAY";
+                        font-size: 11px;
+                        color: #A0A0B0;
+                        horizontal-alignment: TextHorizontalAlignment.center;
+                        letter-spacing: 3px;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 30px;
+                        alignment: LayoutAlignment.center;
+
+                        VerticalLayout {
+                            spacing: 10px;
+                            alignment: center;
+                            cross-axis-alignment: CrossAxisAlignment.center;
+
+                            Text { text: "TIME"; font-size: 12px; color: #A0A0B0; }
+                            ControlKnob {
+                                minimum: 1.0;
+                                maximum: 1000.0;
+                                default-value: 300.0;
+                                value <=> root.delay-time;
+                                changed(v) => { root.delay-time-changed(v); }
+                            }
+                            Text { text: root.formatMs(root.delay-time); font-size: 13px; color: #C77DFF; }
+                        }
+
+                        VerticalLayout {
+                            spacing: 10px;
+                            alignment: center;
+                            cross-axis-alignment: CrossAxisAlignment.center;
+
+                            Text { text: "FEEDBACK"; font-size: 12px; color: #A0A0B0; }
+                            ControlKnob {
+                                minimum: 0.0;
+                                maximum: 90.0;
+                                default-value: 30.0;
+                                value <=> root.delay-feedback;
+                                changed(v) => { root.delay-feedback-changed(v); }
+                            }
+                            Text { text: round(root.delay-feedback) + " %"; font-size: 13px; color: #C77DFF; }
+                        }
+
+                        VerticalLayout {
+                            spacing: 10px;
+                            alignment: center;
+                            cross-axis-alignment: CrossAxisAlignment.center;
+
+                            Text { text: "MIX"; font-size: 12px; color: #A0A0B0; }
+                            ControlKnob {
+                                minimum: 0.0;
+                                maximum: 100.0;
+                                default-value: 15.0;
+                                value <=> root.delay-mix;
+                                changed(v) => { root.delay-mix-changed(v); }
+                            }
+                            Text { text: round(root.delay-mix) + " %"; font-size: 13px; color: #C77DFF; }
                         }
                     }
                 }

@@ -28,9 +28,11 @@ fn set_panic_hook() {
 }
 
 mod comp;
+mod delay;
 mod editor;
 
 use comp::{CompressorCoefs, CompressorState};
+use delay::{DelayCoefs, DelayState};
 
 pub struct PreVocal {
     dsp: PreVocalDsp,
@@ -64,6 +66,15 @@ pub struct PreVocalParams {
 
     #[id = "comp_makeup"]
     pub comp_makeup: FloatParam,
+
+    #[id = "delay_time"]
+    pub delay_time: FloatParam,
+
+    #[id = "delay_feedback"]
+    pub delay_feedback: FloatParam,
+
+    #[id = "delay_mix"]
+    pub delay_mix: FloatParam,
 
     #[id = "output_trim"]
     pub output_trim: FloatParam,
@@ -192,6 +203,45 @@ impl Default for PreVocalParams {
             .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 
+            delay_time: FloatParam::new(
+                "Delay Time",
+                300.0,
+                FloatRange::Skewed {
+                    min: 1.0,
+                    max: 1_000.0,
+                    factor: FloatRange::skew_factor(300.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" ms")
+            .with_value_to_string(formatters::v2s_f32_rounded(1)),
+
+            delay_feedback: FloatParam::new(
+                "Delay Feedback",
+                30.0,
+                FloatRange::Skewed {
+                    min: 0.0,
+                    max: 90.0,
+                    factor: FloatRange::skew_factor(30.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" %")
+            .with_value_to_string(formatters::v2s_f32_rounded(1)),
+
+            delay_mix: FloatParam::new(
+                "Delay Mix",
+                15.0,
+                FloatRange::Skewed {
+                    min: 0.0,
+                    max: 100.0,
+                    factor: FloatRange::skew_factor(15.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" %")
+            .with_value_to_string(formatters::v2s_f32_rounded(1)),
+
             output_trim: FloatParam::new(
                 "Output Trim",
                 util::db_to_gain(0.0),
@@ -292,7 +342,7 @@ impl Plugin for PreVocal {
 
 impl ClapPlugin for PreVocal {
     const CLAP_ID: &'static str = "com.prevocal.prevocal";
-    const CLAP_DESCRIPTION: Option<&'static str> = Some("Vocal Bus Preamp with soft saturation, HPF/LPF, air boost and compressor.");
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("Vocal Bus Preamp with soft saturation, HPF/LPF, air boost, compressor and stereo delay.");
     const CLAP_MANUAL_URL: Option<&'static str> = Some(Self::URL);
     const CLAP_SUPPORT_URL: Option<&'static str> = Some(Self::URL);
     const CLAP_FEATURES: &'static [ClapFeature] = &[
@@ -462,6 +512,7 @@ pub struct PreVocalDsp {
     params: Arc<PreVocalParams>,
     sample_rate: f32,
     filter_states: Vec<ChannelFilter>,
+    delay: DelayState,
 }
 
 /// One set of smoothed parameter values shared by a whole block of audio.
@@ -476,6 +527,9 @@ struct BlockParams {
     comp_attack_ms: f32,
     comp_release_ms: f32,
     comp_makeup_db: f32,
+    delay_time_ms: f32,
+    delay_feedback_pct: f32,
+    delay_mix_pct: f32,
     trim: f32,
 }
 
@@ -485,6 +539,7 @@ impl PreVocalDsp {
             params,
             sample_rate: 48_000.0,
             filter_states: Vec::new(),
+            delay: DelayState::default(),
         }
     }
 
@@ -496,6 +551,7 @@ impl PreVocalDsp {
     /// from the current parameter values.
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
         self.sample_rate = sample_rate;
+        self.delay.set_sample_rate(sample_rate);
         for (_, param_ptr, _) in self.params.param_map() {
             unsafe { param_ptr._internal_update_smoother(sample_rate, true) };
         }
@@ -523,6 +579,9 @@ impl PreVocalDsp {
             comp_attack_ms: self.params.comp_attack.smoothed.next_step(steps),
             comp_release_ms: self.params.comp_release.smoothed.next_step(steps),
             comp_makeup_db: util::gain_to_db(self.params.comp_makeup.smoothed.next_step(steps)),
+            delay_time_ms: self.params.delay_time.smoothed.next_step(steps),
+            delay_feedback_pct: self.params.delay_feedback.smoothed.next_step(steps),
+            delay_mix_pct: self.params.delay_mix.smoothed.next_step(steps),
             trim: self.params.output_trim.smoothed.next_step(steps),
         })
     }
@@ -546,6 +605,15 @@ impl PreVocalDsp {
         )
     }
 
+    fn delay_coefs(&self, p: &BlockParams) -> DelayCoefs {
+        DelayCoefs::new(
+            p.delay_time_ms,
+            p.delay_feedback_pct,
+            p.delay_mix_pct,
+            self.sample_rate,
+        )
+    }
+
     /// Process one block of audio across all channels. Parameters are read from the shared
     /// [`Arc<PreVocalParams>`] once per block, so the smoothers advance in a consistent way.
     pub fn process_block(&mut self, channels: &mut [&mut [f32]]) {
@@ -555,6 +623,8 @@ impl PreVocalDsp {
         };
         let (hpf_coeffs, lpf_coeffs, air_coeffs) = self.coeffs_for(&p);
         let comp_coefs = self.comp_coefs(&p);
+        let delay_coefs = self.delay_coefs(&p);
+        let stereo = channels.len() > 1;
 
         for (channel, samples) in channels.iter_mut().enumerate() {
             let mut hpf = self.filter_states[channel].hpf;
@@ -578,6 +648,19 @@ impl PreVocalDsp {
             }
             self.filter_states[channel] = ChannelFilter { hpf, lpf, air, comp };
         }
+
+        // Stereo delay at the end of the chain: the principal signal stays mono,
+        // only the echo taps are stereo.
+        #[allow(clippy::needless_range_loop)]
+        for frame in 0..num_frames {
+            let left = channels[0][frame];
+            let right = if stereo { channels[1][frame] } else { left };
+            let (out_l, out_r) = self.delay.process(left, right, &delay_coefs, stereo);
+            channels[0][frame] = out_l;
+            if stereo {
+                channels[1][frame] = out_r;
+            }
+        }
     }
 
     /// Process one block of interleaved audio in place (frame-major: `[ch0, ch1, ch0, ch1, ...]`).
@@ -589,6 +672,8 @@ impl PreVocalDsp {
         };
         let (hpf_coeffs, lpf_coeffs, air_coeffs) = self.coeffs_for(&p);
         let comp_coefs = self.comp_coefs(&p);
+        let delay_coefs = self.delay_coefs(&p);
+        let stereo = num_channels > 1;
 
         for frame in 0..num_frames {
             for channel in 0..num_channels {
@@ -611,6 +696,15 @@ impl PreVocalDsp {
                     &mut comp,
                 );
                 self.filter_states[channel] = ChannelFilter { hpf, lpf, air, comp };
+            }
+            // Stereo delay at the end of the chain (mono principal, stereo taps).
+            let idx = frame * num_channels;
+            let left = samples[idx];
+            let right = if stereo { samples[idx + 1] } else { left };
+            let (out_l, out_r) = self.delay.process(left, right, &delay_coefs, stereo);
+            samples[idx] = out_l;
+            if stereo {
+                samples[idx + 1] = out_r;
             }
         }
     }

@@ -47,7 +47,7 @@ static PARENT_WINDOW: Mutex<Option<NonZeroIsize>> = Mutex::new(None);
 /// Preferred editor size in logical pixels (reported to the host via
 /// [`Editor::size`]).
 const LOGICAL_WIDTH: f32 = 1000.0;
-const LOGICAL_HEIGHT: f32 = 640.0;
+const LOGICAL_HEIGHT: f32 = 720.0;
 
 /// Host DPI scale factor, set through [`Editor::set_scale_factor`]. Used to
 /// compute the initial physical window size before the host calls `set_size`.
@@ -137,6 +137,9 @@ fn apply_param_values(ui: &PreVocalUI, params: &PreVocalParams) {
     ui.set_comp_attack(params.comp_attack.modulated_plain_value());
     ui.set_comp_release(params.comp_release.modulated_plain_value());
     ui.set_comp_makeup(util::gain_to_db(params.comp_makeup.modulated_plain_value()));
+    ui.set_delay_time(params.delay_time.modulated_plain_value());
+    ui.set_delay_feedback(params.delay_feedback.modulated_plain_value());
+    ui.set_delay_mix(params.delay_mix.modulated_plain_value());
     ui.set_output_trim(util::gain_to_db(params.output_trim.modulated_plain_value()));
 }
 
@@ -425,6 +428,36 @@ fn create_editor_ui(
 
     let ctx = Arc::clone(context);
     let p = Arc::clone(params);
+    ui.on_delay_time_changed(move |v| {
+        let setter = ParamSetter::new(&*ctx);
+        let ms = v.clamp(1.0, 1_000.0);
+        setter.begin_set_parameter(&p.delay_time);
+        setter.set_parameter(&p.delay_time, ms);
+        setter.end_set_parameter(&p.delay_time);
+    });
+
+    let ctx = Arc::clone(context);
+    let p = Arc::clone(params);
+    ui.on_delay_feedback_changed(move |v| {
+        let setter = ParamSetter::new(&*ctx);
+        let pct = v.clamp(0.0, 90.0);
+        setter.begin_set_parameter(&p.delay_feedback);
+        setter.set_parameter(&p.delay_feedback, pct);
+        setter.end_set_parameter(&p.delay_feedback);
+    });
+
+    let ctx = Arc::clone(context);
+    let p = Arc::clone(params);
+    ui.on_delay_mix_changed(move |v| {
+        let setter = ParamSetter::new(&*ctx);
+        let pct = v.clamp(0.0, 100.0);
+        setter.begin_set_parameter(&p.delay_mix);
+        setter.set_parameter(&p.delay_mix, pct);
+        setter.end_set_parameter(&p.delay_mix);
+    });
+
+    let ctx = Arc::clone(context);
+    let p = Arc::clone(params);
     ui.on_output_trim_changed(move |v| {
         let setter = ParamSetter::new(&*ctx);
         let gain = util::db_to_gain(v.clamp(-12.0, 12.0));
@@ -611,6 +644,11 @@ impl Editor for SlintEditor {
             "comp_makeup" => {
                 ui.set_comp_makeup(util::gain_to_db(params.comp_makeup.modulated_plain_value()))
             }
+            "delay_time" => ui.set_delay_time(params.delay_time.modulated_plain_value()),
+            "delay_feedback" => {
+                ui.set_delay_feedback(params.delay_feedback.modulated_plain_value())
+            }
+            "delay_mix" => ui.set_delay_mix(params.delay_mix.modulated_plain_value()),
             "output_trim" => {
                 ui.set_output_trim(util::gain_to_db(params.output_trim.modulated_plain_value()))
             }
@@ -633,6 +671,11 @@ impl Editor for SlintEditor {
             "comp_makeup" => {
                 ui.set_comp_makeup(util::gain_to_db(params.comp_makeup.modulated_plain_value()))
             }
+            "delay_time" => ui.set_delay_time(params.delay_time.modulated_plain_value()),
+            "delay_feedback" => {
+                ui.set_delay_feedback(params.delay_feedback.modulated_plain_value())
+            }
+            "delay_mix" => ui.set_delay_mix(params.delay_mix.modulated_plain_value()),
             "output_trim" => {
                 ui.set_output_trim(util::gain_to_db(params.output_trim.modulated_plain_value()))
             }

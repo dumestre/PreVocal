@@ -88,6 +88,15 @@ impl UiBridge {
                 .comp_makeup
                 ._internal_update_smoother(sample_rate, false);
             self.params
+                .delay_time
+                ._internal_update_smoother(sample_rate, false);
+            self.params
+                .delay_feedback
+                ._internal_update_smoother(sample_rate, false);
+            self.params
+                .delay_mix
+                ._internal_update_smoother(sample_rate, false);
+            self.params
                 .output_trim
                 ._internal_update_smoother(sample_rate, false);
         }
@@ -195,6 +204,39 @@ impl UiBridge {
         self.update_smoothers();
     }
 
+    fn write_delay_time(&self, ms: f32) {
+        let ms = ms.clamp(1.0, 1_000.0);
+        if !ms.is_finite() {
+            return;
+        }
+        unsafe {
+            self.params.delay_time._internal_set_plain_value(ms);
+        }
+        self.update_smoothers();
+    }
+
+    fn write_delay_feedback(&self, pct: f32) {
+        let pct = pct.clamp(0.0, 90.0);
+        if !pct.is_finite() {
+            return;
+        }
+        unsafe {
+            self.params.delay_feedback._internal_set_plain_value(pct);
+        }
+        self.update_smoothers();
+    }
+
+    fn write_delay_mix(&self, pct: f32) {
+        let pct = pct.clamp(0.0, 100.0);
+        if !pct.is_finite() {
+            return;
+        }
+        unsafe {
+            self.params.delay_mix._internal_set_plain_value(pct);
+        }
+        self.update_smoothers();
+    }
+
     fn write_output_trim(&self, db: f32) {
         let db = db.clamp(-12.0, 12.0);
         if !db.is_finite() {
@@ -241,6 +283,18 @@ impl UiBridge {
 
     fn comp_makeup_value(&self) -> f32 {
         util::gain_to_db(self.params.comp_makeup.modulated_plain_value())
+    }
+
+    fn delay_time_value(&self) -> f32 {
+        self.params.delay_time.modulated_plain_value()
+    }
+
+    fn delay_feedback_value(&self) -> f32 {
+        self.params.delay_feedback.modulated_plain_value()
+    }
+
+    fn delay_mix_value(&self) -> f32 {
+        self.params.delay_mix.modulated_plain_value()
     }
 
     fn output_trim_value(&self) -> f32 {
@@ -1178,6 +1232,9 @@ fn run_gui(
     ui.set_comp_attack(bridge.comp_attack_value());
     ui.set_comp_release(bridge.comp_release_value());
     ui.set_comp_makeup(bridge.comp_makeup_value());
+    ui.set_delay_time(bridge.delay_time_value());
+    ui.set_delay_feedback(bridge.delay_feedback_value());
+    ui.set_delay_mix(bridge.delay_mix_value());
     ui.set_output_trim(bridge.output_trim_value());
 
     {
@@ -1213,6 +1270,15 @@ fn run_gui(
 
     let bridge_comp_makeup = Arc::clone(&bridge);
     ui.on_comp_makeup_changed(move |v| bridge_comp_makeup.write_comp_makeup(v));
+
+    let bridge_delay_time = Arc::clone(&bridge);
+    ui.on_delay_time_changed(move |v| bridge_delay_time.write_delay_time(v));
+
+    let bridge_delay_feedback = Arc::clone(&bridge);
+    ui.on_delay_feedback_changed(move |v| bridge_delay_feedback.write_delay_feedback(v));
+
+    let bridge_delay_mix = Arc::clone(&bridge);
+    ui.on_delay_mix_changed(move |v| bridge_delay_mix.write_delay_mix(v));
 
     let bridge_trim = Arc::clone(&bridge);
     ui.on_output_trim_changed(move |v| bridge_trim.write_output_trim(v));
