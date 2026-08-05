@@ -537,7 +537,7 @@ export component PreVocalUI inherits Window {
                         value <=> root.air;
                         changed(v) => { root.air-changed(v); }
                     }
-                    Text { text: root.air + " dB"; font-size: 14px; color: #C77DFF; }
+                    Text { text: root.formatDb(root.air); font-size: 14px; color: #C77DFF; }
                 }
 
                 VerticalLayout {
