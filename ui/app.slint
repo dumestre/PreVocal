@@ -158,6 +158,16 @@ export component PreVocalUI inherits Window {
     callback restart-clicked();
     callback refresh-clicked();
 
+    // Formata um valor de frequência como um knob real: 20 Hz, 200 Hz, 2 kHz, 12.5 kHz
+    pure function freqLabel(f: float) -> string {
+        if f >= 1000.0 {
+            let k = f / 1000.0;
+            let v = k >= 10.0 ? round(k) : round(k * 10.0) / 10.0;
+            return v + " kHz";
+        }
+        return round(f) + " Hz";
+    }
+
     VerticalLayout {
         padding: 26px;
         spacing: 20px;
@@ -493,10 +503,11 @@ export component PreVocalUI inherits Window {
                     ControlKnob {
                         minimum: 20.0;
                         maximum: 200.0;
+                        default-value: 20.0;
                         value <=> root.hpf;
                         changed(v) => { root.hpf-changed(v); }
                     }
-                    Text { text: root.hpf; font-size: 14px; color: #C77DFF; }
+                    Text { text: root.freqLabel(root.hpf); font-size: 14px; color: #C77DFF; }
                 }
 
                 VerticalLayout {
@@ -509,10 +520,11 @@ export component PreVocalUI inherits Window {
                     ControlKnob {
                         minimum: 500.0;
                         maximum: 20000.0;
+                        default-value: 20000.0;
                         value <=> root.lpf;
                         changed(v) => { root.lpf-changed(v); }
                     }
-                    Text { text: root.lpf; font-size: 14px; color: #C77DFF; }
+                    Text { text: root.freqLabel(root.lpf); font-size: 14px; color: #C77DFF; }
                 }
 
                 VerticalLayout {
