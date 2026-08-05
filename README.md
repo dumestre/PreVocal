@@ -5,22 +5,56 @@ suporte a plugins VST3/CLAP via [nice-plug](https://codeberg.org/RustAudio/nice-
 
 ## Recursos DSP
 
-| Controle      | Faixa         | Descrição                              |
-| ------------- | ------------- | -------------------------------------- |
-| Drive         | 0 – 24 dB     | Saturação macia com `tanh`             |
-| HPF           | 20 – 200 Hz   | Filtro passa-altas Butterworth 2ª ordem|
-| Air           | 0 – 6 dB      | High-shelf a 10 kHz                    |
-| Phase Flip    | on/off        | Inversão de polaridade (180°)          |
-| Output Trim   | –12 – +12 dB  | Ganho de saída                         |
+| Controle      | Faixa          | Descrição                                      |
+| ------------- | -------------- | ---------------------------------------------- |
+| Drive         | 0 – 24 dB      | Saturação macia com `tanh`                     |
+| HPF           | 20 – 200 Hz    | Filtro passa-altas Butterworth 2ª ordem        |
+| LPF           | 500 – 20 kHz   | Filtro passa-baixas Butterworth 2ª ordem       |
+| Air           | 0 – 6 dB       | High-shelf a 10 kHz                            |
+| Compressor    | -60 – 0 dB     | Threshold, Ratio, Attack, Release, Makeup      |
+| Delay         | 1 – 1000 ms    | Delay estéreo (eco), sinal principal mono      |
+| Output Trim   | –12 – +12 dB   | Ganho de saída                                 |
 
-## Executar no modo Standalone
+Cadeia do sinal:
 
-```sh
-cargo run --features standalone --bin prevocal-standalone
+```text
+Drive -> HPF -> LPF -> Air -> Compressor -> Trim -> Delay (estéreo)
 ```
 
-O standalone usa o **dispositivo de entrada (microfone) e de saída padrão do sistema**,
-funcionando no Windows (WASAPI) e no Linux (ALSA/JACK via `cpal`).
+## Guia rápido de comandos
+
+### 1) Rodar o standalone (testar com microfone, WASAPI — padrão Windows)
+
+```sh
+cargo run --bin prevocal-standalone
+```
+
+### 2) Rodar o standalone com ASIO (baixa latência, interface de áudio)
+
+Na primeira vez, aponte o LLVM/Clang (obrigatório para compilar o SDK ASIO):
+
+```sh
+$env:LIBCLANG_PATH = "$env:ProgramFiles\LLVM\bin"
+$env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+cargo run --features asio --bin prevocal-standalone
+```
+
+Pré-requisitos: **Visual Studio Build Tools** (workload C++, MSVC + Windows SDK) e **LLVM/Clang** instalado.
+
+### 3) Gerar os plugins VST3/CLAP (para usar na DAW)
+
+```sh
+cargo install cargo-nice-plug
+$env:LIBCLANG_PATH = "$env:ProgramFiles\LLVM\bin"
+$env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+cargo nice-plug bundle PreVocal --release
+```
+
+Os bundles aparecem em `target/nice-plug/`.
+
+---
+
+## Usando o standalone
 
 A barra **AUDIO** no topo da janela permite:
 
@@ -35,54 +69,7 @@ A última seleção fica salva em `prevocal-last-device.txt` (ao lado do execut�
 restaurada no próximo launch. O status à direita indica `RUNNING` (verde), erro
 (vermelho) ou vazio (cinza).
 
-### ASIO no Windows (baixa latência)
-
-Para usar drivers ASIO (ASIO4ALL, interfaces com driver nativo), habilite a feature:
-
-```sh
-cargo run --features standalone,asio --bin prevocal-standalone
-```
-
-Pré-requisitos para compilar o host ASIO do `cpal`:
-
-1. **Visual Studio Build Tools** com o workload C++ (MSVC + Windows SDK).
-2. **LLVM/Clang** no `PATH` (o cpal usa clang para compilar o SDK da Steinberg).
-
-> Nota: a feature `asio` é opcional e só é compilada quando ativada. Se você não
-> precisar de ASIO, mantenha o comando padrão (`--features standalone`).
-
-Prerequisitos (Linux): `libasound2-dev` (ALSA) ou JACK para áudio via `cpal`.
-
-O fluxo de áudio é:
-
-```text
-dispositivo selecionado (entrada) -> DSP (Drive -> HPF -> Air -> Trim -> Phase) -> dispositivo selecionado (saída)
-          |                                                                      |
-          +--> meter IN (sinal bruto do mic)                                      +--> meter OUT (sinal processado)
-```
-
-> Nota: se você não ouvir nada, confira se o microfone padrão do sistema está
-> captando (Windows: Configurações > Sistema > Som > Entrada; Linux: `pavucontrol`).
-
-## Gerar bundles de plugin (VST3 / CLAP)
-
-Instale a ferramenta de empacotamento:
-
-```sh
-cargo install cargo-nice-plug
-```
-
-Compile e empacote:
-
-```sh
-
-
-cargo build --release --features standalone   # exe standalone
-
-$env:LIBCLANG_PATH = "$env:ProgramFiles\LLVM\bin"
-$env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
-cargo nice-plug bundle PreVocal --release             # bundles VST3/CLAP
-
-```
-
-Os bundles aparecerão em `target/nice-plug/`.
+> Se você não ouvir nada, confira se o microfone padrão do sistema está captando
+> (Windows: Configurações > Sistema > Som > Entrada; Linux: `pavucontrol`).
+>
+> Pré-requisitos (Linux): `libasound2-dev` (ALSA) ou JACK para áudio via `cpal`.

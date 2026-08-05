@@ -436,14 +436,7 @@ export component PreVocalUI inherits Window {
                 HorizontalLayout {
                     alignment: LayoutAlignment.center;
 
-                    Image {
-                        width: 90px;
-                        height: 130px;
-                        image-fit: contain;
-                        source: root.drive <= 0.0 ? @image-url("../src/icons/off.png")
-                              : root.drive >= 24.0 ? @image-url("../src/icons/100.png")
-                              : @image-url("../src/icons/50.png");
-                    }
+                   
                 }
 
                 // Preamp section: drive, filters, air and output trim
@@ -484,6 +477,7 @@ export component PreVocalUI inherits Window {
                     Text { text: "DRIVE"; font-size: 13px; color: #A0A0B0; }
                     VerticalFader {
                         minimum: 0.;
+                        height: 100px;
                         maximum: 24.0;
                         value <=> root.drive;
                         changed(v) => { root.drive-changed(v); }
@@ -551,6 +545,7 @@ export component PreVocalUI inherits Window {
                     Text { text: "TRIM"; font-size: 13px; color: #A0A0B0; }
                     VerticalFader {
                         minimum: -12.0;
+                        height: 100px;
                         maximum: 12.0;
                         value <=> root.output-trim;
                         changed(v) => { root.output-trim-changed(v); }
