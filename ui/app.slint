@@ -1,7 +1,7 @@
 // PreVocal — Vocal Bus Preamp
 // Dark Studio Pro / Anodized Metal theme with Neon Purple accents.
 
-import { ComboBox } from "std-widgets.slint";
+import { ComboBox, LineEdit } from "std-widgets.slint";
 import { ControlKnob } from "knob.slint";
 import { VerticalFader } from "fader.slint";
 
@@ -9,8 +9,8 @@ component LevelMeter inherits Rectangle {
     in-out property <float> level: 0.0;
     in-out property <float> peak: 0.0;
 
-    width: 14px;
-    height: 150px;
+    preferred-width: 14px;
+    preferred-height: 150px;
 
     // Green below -6 dB, yellow -6..-3 dB, red above -3 dB (clip zone).
     // The level is a 0..1 mapping of the dBFS scale (see level_to_meter in main.rs).
@@ -399,10 +399,35 @@ export component PreVocalUI inherits Window {
                 transform-origin: { x: self.width / 2, y: self.height / 2 };
             }
 
-            VerticalLayout {
+            HorizontalLayout {
                 padding: 24px;
                 spacing: 20px;
                 height: 100%;
+
+                // Input meter (left edge, full height)
+                VerticalLayout {
+                    padding-bottom: 50px;
+                    spacing: 8px;
+                    alignment: LayoutAlignment.end;
+                    cross-axis-alignment: CrossAxisAlignment.center;
+                    width: 25px;
+                    vertical-stretch: 1;
+                    LevelMeter {
+                        accessible-role: AccessibleRole.none;
+                        level: root.input-level;
+                        peak: root.input-peak;
+                        width: 14px;
+                        vertical-stretch: 1;
+                    }
+                    Text { text: "IN";
+                        vertical-alignment: TextVerticalAlignment.top; font-size: 11px;
+                        horizontal-alignment: TextHorizontalAlignment.center; color: #A0A0B0; }
+                }
+
+                VerticalLayout {
+                    spacing: 20px;
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
 
                 // Drive status image (off / half / full), centered at the top of the panel
                 HorizontalLayout {
@@ -424,6 +449,12 @@ export component PreVocalUI inherits Window {
                     horizontal-stretch: 1;
                     vertical-stretch: 1;
 
+                    Rectangle {
+                        background: #2f4f4f8f;
+                        border-radius: 6px;
+                        drop-shadow-blur: 0px;
+                        drop-shadow-color: #2f4f4f8f;
+                        drop-shadow-offset-y: 0px; 
                     Text {
                         text: "PREAMP";
                         font-size: 11px;
@@ -431,26 +462,13 @@ export component PreVocalUI inherits Window {
                         horizontal-alignment: TextHorizontalAlignment.center;
                         letter-spacing: 3px;
                     }
+                }
 
                 HorizontalLayout {
                     spacing: 20px;
                     alignment: LayoutAlignment.center;
                     horizontal-stretch: 1;
                     vertical-stretch: 1;
-
-                // Input meter (left)
-                VerticalLayout {
-                    spacing: 8px;
-                    alignment: LayoutAlignment.center;
-                    cross-axis-alignment: CrossAxisAlignment.center;
-                    width: 36px;
-                    LevelMeter {
-                        level: root.input-level;
-                        peak: root.input-peak;
-                    }
-                    Text { text: "IN"; font-size: 11px;
-                        horizontal-alignment: TextHorizontalAlignment.center; color: #A0A0B0; }
-                }
 
                 VerticalLayout {
                     spacing: 16px;
@@ -534,27 +552,21 @@ export component PreVocalUI inherits Window {
                     }
                     Text { text: root.output-trim + " dB"; font-size: 14px; color: #C77DFF; }
                 }
-
-                // Output meter (right)
-                VerticalLayout {
-                    spacing: 8px;
-                    alignment: center;
-                    cross-axis-alignment: CrossAxisAlignment.center;
-                    width: 36px;
-                    LevelMeter {
-                        level: root.output-level;
-                        peak: root.output-peak;
-                    }
-                    Text { text: "OUT"; font-size: 11px; color: #A0A0B0; }
-                }
                 }
                 }
 
                 // Compressor section
+                
                 VerticalLayout {
                     spacing: 12px;
                     alignment: center;
 
+                    Rectangle {
+                        background: #2f4f4f8f;
+                        border-radius: 6px;
+                        drop-shadow-blur: 0px;
+                        drop-shadow-color: #2f4f4f8f;
+                        drop-shadow-offset-y: 0px; 
                     Text {
                         text: "COMPRESSOR";
                         font-size: 11px;
@@ -562,6 +574,7 @@ export component PreVocalUI inherits Window {
                         horizontal-alignment: TextHorizontalAlignment.center;
                         letter-spacing: 3px;
                     }
+                }
 
                     HorizontalLayout {
                         spacing: 30px;
@@ -654,6 +667,12 @@ export component PreVocalUI inherits Window {
                     spacing: 12px;
                     alignment: center;
 
+                    Rectangle {
+                        background: #2f4f4f8f;
+                        border-radius: 6px;
+                        drop-shadow-blur: 0px;
+                        drop-shadow-color: #2f4f4f8f;
+                        drop-shadow-offset-y: 0px; 
                     Text {
                         text: "DELAY";
                         font-size: 11px;
@@ -661,6 +680,7 @@ export component PreVocalUI inherits Window {
                         horizontal-alignment: TextHorizontalAlignment.center;
                         letter-spacing: 3px;
                     }
+                }
 
                     HorizontalLayout {
                         spacing: 30px;
@@ -714,6 +734,28 @@ export component PreVocalUI inherits Window {
                             Text { text: round(root.delay-mix) + " %"; font-size: 13px; color: #C77DFF; }
                         }
                     }
+                }
+                }
+
+                // Output meter (right edge, full height)
+                VerticalLayout {
+                    padding-bottom: 50px;
+                    spacing: 8px;
+                    alignment: LayoutAlignment.end;
+                    cross-axis-alignment: CrossAxisAlignment.center;
+                    width: 25px;
+                    vertical-stretch: 0;
+                    LevelMeter {
+                        level: root.output-level;
+                        peak: root.output-peak;
+                        width: 14px;
+                        vertical-stretch: 1;
+                    }
+                    Text { overflow: TextOverflow.clip;
+                        text: "OUT";
+                        vertical-alignment: TextVerticalAlignment.bottom;
+                        wrap: TextWrap.no-wrap; font-size: 11px;
+                        horizontal-alignment: TextHorizontalAlignment.center; color: #A0A0B0; }
                 }
             }
         }
