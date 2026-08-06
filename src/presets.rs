@@ -1,0 +1,169 @@
+//! Factory presets for PreVocal.
+//!
+//! Each preset captures every parameter (in the same units the UI uses: dB,
+//! Hz, ms, %) so it can be applied by both the plugin editor (through
+//! `ParamSetter`) and the standalone (through `UiBridge`).
+
+use crate::PreVocalParams;
+use nice_plug::prelude::*;
+
+/// A full snapshot of the plugin's state.
+#[derive(Clone, Copy)]
+pub struct Preset {
+    pub name: &'static str,
+    pub drive_db: f32,
+    pub hpf_hz: f32,
+    pub lpf_hz: f32,
+    pub air_db: f32,
+    pub comp_thresh_db: f32,
+    pub comp_ratio: f32,
+    pub comp_attack_ms: f32,
+    pub comp_release_ms: f32,
+    pub comp_makeup_db: f32,
+    pub comp_bypass: bool,
+    pub delay_time_ms: f32,
+    pub delay_feedback_pct: f32,
+    pub delay_mix_pct: f32,
+    pub delay_bypass: bool,
+    pub trim_db: f32,
+}
+
+pub const PRESETS: &[Preset] = &[
+    Preset {
+        name: "Default",
+        drive_db: 0.0,
+        hpf_hz: 20.0,
+        lpf_hz: 20_000.0,
+        air_db: 0.0,
+        comp_thresh_db: -18.0,
+        comp_ratio: 3.0,
+        comp_attack_ms: 5.0,
+        comp_release_ms: 100.0,
+        comp_makeup_db: 0.0,
+        comp_bypass: false,
+        delay_time_ms: 300.0,
+        delay_feedback_pct: 30.0,
+        delay_mix_pct: 15.0,
+        delay_bypass: false,
+        trim_db: 0.0,
+    },
+    Preset {
+        name: "Clean",
+        drive_db: 3.0,
+        hpf_hz: 60.0,
+        lpf_hz: 16_000.0,
+        air_db: 1.0,
+        comp_thresh_db: -12.0,
+        comp_ratio: 2.0,
+        comp_attack_ms: 15.0,
+        comp_release_ms: 200.0,
+        comp_makeup_db: 2.0,
+        comp_bypass: false,
+        delay_time_ms: 250.0,
+        delay_feedback_pct: 20.0,
+        delay_mix_pct: 10.0,
+        delay_bypass: false,
+        trim_db: 0.0,
+    },
+    Preset {
+        name: "Radio",
+        drive_db: 8.0,
+        hpf_hz: 120.0,
+        lpf_hz: 12_000.0,
+        air_db: 2.0,
+        comp_thresh_db: -24.0,
+        comp_ratio: 4.0,
+        comp_attack_ms: 8.0,
+        comp_release_ms: 120.0,
+        comp_makeup_db: 4.0,
+        comp_bypass: false,
+        delay_time_ms: 250.0,
+        delay_feedback_pct: 20.0,
+        delay_mix_pct: 12.0,
+        delay_bypass: false,
+        trim_db: 0.0,
+    },
+    Preset {
+        name: "Punch",
+        drive_db: 12.0,
+        hpf_hz: 90.0,
+        lpf_hz: 14_000.0,
+        air_db: 0.0,
+        comp_thresh_db: -30.0,
+        comp_ratio: 8.0,
+        comp_attack_ms: 2.0,
+        comp_release_ms: 80.0,
+        comp_makeup_db: 6.0,
+        comp_bypass: false,
+        delay_time_ms: 200.0,
+        delay_feedback_pct: 15.0,
+        delay_mix_pct: 8.0,
+        delay_bypass: false,
+        trim_db: 0.0,
+    },
+    Preset {
+        name: "Echo",
+        drive_db: 5.0,
+        hpf_hz: 80.0,
+        lpf_hz: 16_000.0,
+        air_db: 1.5,
+        comp_thresh_db: -18.0,
+        comp_ratio: 3.0,
+        comp_attack_ms: 10.0,
+        comp_release_ms: 150.0,
+        comp_makeup_db: 2.0,
+        comp_bypass: false,
+        delay_time_ms: 350.0,
+        delay_feedback_pct: 45.0,
+        delay_mix_pct: 30.0,
+        delay_bypass: false,
+        trim_db: 0.0,
+    },
+    Preset {
+        name: "Airy",
+        drive_db: 6.0,
+        hpf_hz: 100.0,
+        lpf_hz: 18_000.0,
+        air_db: 6.0,
+        comp_thresh_db: -15.0,
+        comp_ratio: 2.5,
+        comp_attack_ms: 12.0,
+        comp_release_ms: 180.0,
+        comp_makeup_db: 2.0,
+        comp_bypass: false,
+        delay_time_ms: 300.0,
+        delay_feedback_pct: 15.0,
+        delay_mix_pct: 10.0,
+        delay_bypass: false,
+        trim_db: 0.0,
+    },
+];
+
+/// Names of every preset, in order.
+pub fn preset_names() -> Vec<&'static str> {
+    PRESETS.iter().map(|p| p.name).collect()
+}
+
+/// Snapshot the current parameter state as a preset.
+pub fn snapshot_preset(name: &'static str, params: &PreVocalParams) -> Preset {
+    Preset {
+        name,
+        drive_db: nice_plug::prelude::util::gain_to_db(params.drive.modulated_plain_value()),
+        hpf_hz: params.hpf.modulated_plain_value(),
+        lpf_hz: params.lpf.modulated_plain_value(),
+        air_db: params.air.modulated_plain_value(),
+        comp_thresh_db: params.comp_thresh.modulated_plain_value(),
+        comp_ratio: params.comp_ratio.modulated_plain_value(),
+        comp_attack_ms: params.comp_attack.modulated_plain_value(),
+        comp_release_ms: params.comp_release.modulated_plain_value(),
+        comp_makeup_db: nice_plug::prelude::util::gain_to_db(
+            params.comp_makeup.modulated_plain_value(),
+        ),
+        comp_bypass: params.comp_bypass.value(),
+        delay_time_ms: params.delay_time.modulated_plain_value(),
+        delay_feedback_pct: params.delay_feedback.modulated_plain_value(),
+        delay_mix_pct: params.delay_mix.modulated_plain_value(),
+        delay_bypass: params.delay_bypass.value(),
+        trim_db: nice_plug::prelude::util::gain_to_db(params.output_trim.modulated_plain_value()),
+    }
+}

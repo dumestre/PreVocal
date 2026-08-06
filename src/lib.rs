@@ -30,9 +30,11 @@ fn set_panic_hook() {
 mod comp;
 mod delay;
 mod editor;
+mod presets;
 
 use comp::{CompressorCoefs, CompressorState};
 use delay::{DelayCoefs, DelayState};
+pub use presets::{preset_names, snapshot_preset, Preset, PRESETS};
 
 pub struct PreVocal {
     dsp: PreVocalDsp,

@@ -37,7 +37,7 @@ use nice_plug::prelude::*;
 use slint::winit_030::winit::event::WindowEvent;
 use slint::winit_030::{EventResult, WinitWindowAccessor};
 
-use crate::PreVocalParams;
+use crate::{preset_names, PreVocalParams, Preset, PRESETS};
 
 /// Parent HWND captured from `spawn()` and applied by the window-attributes hook.
 /// Only the `Win32Hwnd` variant is supported for embedding right now; other
@@ -290,6 +290,74 @@ fn install_redraw_event_filter(window: &slint::Window) {
     });
 }
 
+/// Apply every parameter of a preset to the plugin through the host's
+/// `ParamSetter`, so the host records automation for the whole batch.
+fn apply_preset(setter: &ParamSetter, params: &PreVocalParams, preset: &Preset) {
+    let drive = util::db_to_gain(preset.drive_db);
+    let makeup = util::db_to_gain(preset.comp_makeup_db);
+    let trim = util::db_to_gain(preset.trim_db);
+
+    setter.begin_set_parameter(&params.drive);
+    setter.set_parameter(&params.drive, drive);
+    setter.end_set_parameter(&params.drive);
+
+    setter.begin_set_parameter(&params.hpf);
+    setter.set_parameter(&params.hpf, preset.hpf_hz);
+    setter.end_set_parameter(&params.hpf);
+
+    setter.begin_set_parameter(&params.lpf);
+    setter.set_parameter(&params.lpf, preset.lpf_hz);
+    setter.end_set_parameter(&params.lpf);
+
+    setter.begin_set_parameter(&params.air);
+    setter.set_parameter(&params.air, preset.air_db);
+    setter.end_set_parameter(&params.air);
+
+    setter.begin_set_parameter(&params.comp_thresh);
+    setter.set_parameter(&params.comp_thresh, preset.comp_thresh_db);
+    setter.end_set_parameter(&params.comp_thresh);
+
+    setter.begin_set_parameter(&params.comp_ratio);
+    setter.set_parameter(&params.comp_ratio, preset.comp_ratio);
+    setter.end_set_parameter(&params.comp_ratio);
+
+    setter.begin_set_parameter(&params.comp_attack);
+    setter.set_parameter(&params.comp_attack, preset.comp_attack_ms);
+    setter.end_set_parameter(&params.comp_attack);
+
+    setter.begin_set_parameter(&params.comp_release);
+    setter.set_parameter(&params.comp_release, preset.comp_release_ms);
+    setter.end_set_parameter(&params.comp_release);
+
+    setter.begin_set_parameter(&params.comp_makeup);
+    setter.set_parameter(&params.comp_makeup, makeup);
+    setter.end_set_parameter(&params.comp_makeup);
+
+    setter.begin_set_parameter(&params.comp_bypass);
+    setter.set_parameter(&params.comp_bypass, preset.comp_bypass);
+    setter.end_set_parameter(&params.comp_bypass);
+
+    setter.begin_set_parameter(&params.delay_time);
+    setter.set_parameter(&params.delay_time, preset.delay_time_ms);
+    setter.end_set_parameter(&params.delay_time);
+
+    setter.begin_set_parameter(&params.delay_feedback);
+    setter.set_parameter(&params.delay_feedback, preset.delay_feedback_pct);
+    setter.end_set_parameter(&params.delay_feedback);
+
+    setter.begin_set_parameter(&params.delay_mix);
+    setter.set_parameter(&params.delay_mix, preset.delay_mix_pct);
+    setter.end_set_parameter(&params.delay_mix);
+
+    setter.begin_set_parameter(&params.delay_bypass);
+    setter.set_parameter(&params.delay_bypass, preset.delay_bypass);
+    setter.end_set_parameter(&params.delay_bypass);
+
+    setter.begin_set_parameter(&params.output_trim);
+    setter.set_parameter(&params.output_trim, trim);
+    setter.end_set_parameter(&params.output_trim);
+}
+
 /// Create a new editor window (parented to the host's view) and wire up the
 /// UI<->parameter glue. Runs on the persistent editor thread, so the winit
 /// backend's platform state is reused instead of re-initialized.
@@ -326,6 +394,10 @@ fn create_editor_ui(
     ui.window().set_size(slint::PhysicalSize::new(initial.0, initial.1));
 
     ui.set_audio_controls_visible(false);
+    let preset_names: Vec<slint::SharedString> =
+        preset_names().iter().map(|s| (*s).into()).collect();
+    ui.set_preset_names(slint::ModelRc::new(slint::VecModel::from(preset_names)));
+    ui.set_preset_index(0);
     apply_param_values(&ui, params);
 
     // Continuous repaint + forced full repaint on restore/focus (see
@@ -484,6 +556,14 @@ fn create_editor_ui(
         setter.begin_set_parameter(&p.output_trim);
         setter.set_parameter(&p.output_trim, gain);
         setter.end_set_parameter(&p.output_trim);
+    });
+
+    let ctx = Arc::clone(context);
+    let p = Arc::clone(params);
+    ui.on_preset_selected(move |idx: i32| {
+        let idx = idx.clamp(0, PRESETS.len() as i32 - 1) as usize;
+        let setter = ParamSetter::new(&*ctx);
+        apply_preset(&setter, &p, &PRESETS[idx]);
     });
 
     *active.lock().unwrap() = Some(ui.as_weak());

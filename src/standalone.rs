@@ -22,7 +22,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SizedSample};
 use nice_plug::params::InternalParamMut;
 use nice_plug::prelude::*;
-use prevocal::{PreVocalDsp, PreVocalParams};
+use prevocal::{preset_names, PreVocalDsp, PreVocalParams, Preset, PRESETS};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -247,6 +247,33 @@ impl UiBridge {
             self.params.output_trim._internal_set_plain_value(gain);
         }
         self.update_smoothers();
+    }
+
+    /// Apply a factory preset to every parameter at once.
+    fn apply_preset(&self, preset: &Preset) {
+        self.write_drive(preset.drive_db);
+        self.write_hpf(preset.hpf_hz);
+        self.write_lpf(preset.lpf_hz);
+        self.write_air(preset.air_db);
+        self.write_comp_thresh(preset.comp_thresh_db);
+        self.write_comp_ratio(preset.comp_ratio);
+        self.write_comp_attack(preset.comp_attack_ms);
+        self.write_comp_release(preset.comp_release_ms);
+        self.write_comp_makeup(preset.comp_makeup_db);
+        unsafe {
+            self.params
+                .comp_bypass
+                ._internal_set_plain_value(preset.comp_bypass);
+        }
+        self.write_delay_time(preset.delay_time_ms);
+        self.write_delay_feedback(preset.delay_feedback_pct);
+        self.write_delay_mix(preset.delay_mix_pct);
+        unsafe {
+            self.params
+                .delay_bypass
+                ._internal_set_plain_value(preset.delay_bypass);
+        }
+        self.write_output_trim(preset.trim_db);
     }
 
     fn drive_value(&self) -> f32 {
@@ -1237,6 +1264,10 @@ fn run_gui(
     ui.set_delay_mix(bridge.delay_mix_value());
     ui.set_output_trim(bridge.output_trim_value());
 
+    let preset_names: Vec<String> = preset_names().iter().map(|s| s.to_string()).collect();
+    ui.set_preset_names(string_model(&preset_names));
+    ui.set_preset_index(0);
+
     {
         let mgr = manager.lock().unwrap();
         sync_ui(&ui, &mgr);
@@ -1282,6 +1313,32 @@ fn run_gui(
 
     let bridge_trim = Arc::clone(&bridge);
     ui.on_output_trim_changed(move |v| bridge_trim.write_output_trim(v));
+
+    // The user selected a preset (dropdown or prev/next arrows): apply it and
+    // refresh the knobs/faders so the UI matches the new parameter values.
+    let bridge_preset = Arc::clone(&bridge);
+    let weak_preset = ui_weak.clone();
+    ui.on_preset_selected(move |idx: i32| {
+        let idx = idx.clamp(0, PRESETS.len() as i32 - 1) as usize;
+        bridge_preset.apply_preset(&PRESETS[idx]);
+        if let Some(ui) = weak_preset.upgrade() {
+            ui.set_drive(bridge_preset.drive_value());
+            ui.set_hpf(bridge_preset.hpf_value());
+            ui.set_lpf(bridge_preset.lpf_value());
+            ui.set_air(bridge_preset.air_value());
+            ui.set_comp_thresh(bridge_preset.comp_thresh_value());
+            ui.set_comp_ratio(bridge_preset.comp_ratio_value());
+            ui.set_comp_attack(bridge_preset.comp_attack_value());
+            ui.set_comp_release(bridge_preset.comp_release_value());
+            ui.set_comp_makeup(bridge_preset.comp_makeup_value());
+            ui.set_comp_bypass(PRESETS[idx].comp_bypass);
+            ui.set_delay_time(bridge_preset.delay_time_value());
+            ui.set_delay_feedback(bridge_preset.delay_feedback_value());
+            ui.set_delay_mix(bridge_preset.delay_mix_value());
+            ui.set_delay_bypass(PRESETS[idx].delay_bypass);
+            ui.set_output_trim(bridge_preset.output_trim_value());
+        }
+    });
 
     // The user picked a driver: repopulate the input/output device lists.
     let mgr_driver = Arc::clone(&manager);

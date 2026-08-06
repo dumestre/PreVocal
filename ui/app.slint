@@ -175,6 +175,8 @@ export component PreVocalUI inherits Window {
     in-out property <bool> audio-running: false;
     // Hidden by the plugin editor (audio is handled by the DAW host), shown in the standalone.
     in-out property <bool> audio-controls-visible: true;
+    in-out property <[string]> preset-names: [];
+    in-out property <int> preset-index: 0;
 
     callback drive-changed(float);
     callback hpf-changed(float);
@@ -196,6 +198,7 @@ export component PreVocalUI inherits Window {
     callback output-selected(string);
     callback restart-clicked();
     callback refresh-clicked();
+    callback preset-selected(int);
 
     // Formata um valor de frequência como um knob real: 20 Hz, 200 Hz, 2 kHz, 12.5 kHz
     pure function freqLabel(f: float) -> string {
@@ -334,12 +337,13 @@ export component PreVocalUI inherits Window {
                         background: ta_refresh.pressed ? #3C096C : #121214;
                         border-width: 1px;
                         border-color: #3C096C;
-                        Text {
-                            text: "↻";
-                            font-size: 16px;
-                            color: #C77DFF;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                        Image {
+                            width: 16px;
+                            height: 16px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            source: @image-url("../src/icons/refresh.svg");
+                            image-fit: ImageFit.contain;
                         }
                         ta_refresh := TouchArea {
                             width: parent.width;
@@ -507,14 +511,90 @@ export component PreVocalUI inherits Window {
 
                 VerticalLayout {
                     spacing: 20px;
+                    cross-axis-alignment: CrossAxisAlignment.stretch;
                     horizontal-stretch: 1;
                     vertical-stretch: 1;
 
-                // Drive status image (off / half / full), centered at the top of the panel
+                // Preset selector: ◀ [dropdown with preset names] ▶
                 HorizontalLayout {
                     alignment: LayoutAlignment.center;
+                    cross-axis-alignment: CrossAxisAlignment.center;
+                    spacing: 10px;
 
-                   
+                    Text {
+                        text: "PRESET";
+                        font-size: 10px;
+                        letter-spacing: 2px;
+                        color: Colors.aliceblue;
+                        font-family: "";
+                        vertical-alignment: center;
+                    }
+
+                    // Previous preset
+                    Rectangle {
+                        width: 26px;
+                        height: 24px;
+                        border-radius: 12px;
+                        background: ta_preset_prev.pressed ? #3C096C : #12121421;
+                        border-width: 1px;
+                        Image {
+                            width: 14px;
+                            height: 14px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            source: @image-url("../src/icons/chevron-left.svg");
+                            image-fit: contain;
+                        }
+                        ta_preset_prev := TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                            clicked => {
+                                let i = root.preset-index - 1;
+                                root.preset-index = i < 0 ? root.preset-names.length - 1 : i;
+                                root.preset-selected(root.preset-index);
+                            }
+                        }
+                    }
+
+                    // Dropdown with every preset; clicking the name opens it
+                    presetCombo := ComboBox {
+                        min-width: 220px;
+                        model: root.preset-names;
+                        current-index: root.preset-index;
+                        selected(v) => {
+                            root.preset-index = presetCombo.current-index;
+                            root.preset-selected(root.preset-index);
+                        }
+                    }
+
+                    // Next preset
+                    Rectangle {
+                        width: 26px;
+                        height: 24px;
+                        border-radius: 12px;
+                        accessible-role: AccessibleRole.none;
+                        background: ta_preset_prev.pressed ? #3C096C : #12121421;
+                        border-width: 1px;
+                       
+                        Image {
+                            width: 14px;
+                            accessible-role: AccessibleRole.none;
+                            height: 14px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            source: @image-url("../src/icons/chevron-right.svg");
+                            image-fit: contain;
+                        }
+                        ta_preset_next := TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                            clicked => {
+                                let i = root.preset-index + 1;
+                                root.preset-index = i >= root.preset-names.length ? 0 : i;
+                                root.preset-selected(root.preset-index);
+                            }
+                        }
+                    }
                 }
 
                 // Preamp section: drive, filters, air and output trim
@@ -853,7 +933,7 @@ export component PreVocalUI inherits Window {
                     alignment: LayoutAlignment.end;
                     cross-axis-alignment: CrossAxisAlignment.start;
                     width: 54px;
-                    vertical-stretch: 0;
+                    vertical-stretch: 1;
                     MeterWithScale {
                         accessible-role: AccessibleRole.none;
                         level: root.output-level;
