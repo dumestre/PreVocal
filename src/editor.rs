@@ -664,17 +664,18 @@ fn editor_thread_loop(
     };
     if let Err(e) = slint::BackendSelector::new()
         .backend_name("winit".into())
-        // Software renderer (GDI/softbuffer) instead of femtovg/OpenGL:
-        // the glutin path (EGL/WGL) fails to present into a WS_CHILD
-        // window, leaving the host's editor view blank.
-        .renderer_name("sw".to_string())
+        // OpenGL renderer: correct rounded corners/clipping and GPU rendering.
+        // (Previously we fell back to the software renderer because the
+        // EGL/WGL presentation into a WS_CHILD window failed in some hosts;
+        // re-validated against Cubase / FL Studio / Bitwig.)
+        .renderer_name("femtovg".to_string())
         .with_winit_window_attributes_hook(hook)
         .select()
     {
         tracing::error!("Failed to select Slint winit backend: {:?}", e);
         return;
     }
-    tracing::info!("Slint winit backend selected with software renderer");
+    tracing::info!("Slint winit backend selected with OpenGL (femtovg) renderer");
 
     loop {
         let (parent_hwnd, context) = match rx.recv() {
