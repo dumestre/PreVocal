@@ -66,8 +66,49 @@ component LevelMeter inherits Rectangle {
     }
 }
 
-// Bypass switch for a DSP section (compressor / delay). The preamp has no
-// bypass: it is the heart of the plugin and always runs.
+// Meter with a dB scale next to it: 0..1 maps to -60 dB (bottom) .. 0 dB (top).
+component MeterWithScale inherits Rectangle {
+    in-out property <float> level: 0.0;
+    in-out property <float> peak: 0.0;
+
+    preferred-width: 50px;
+    preferred-height: 150px;
+
+    // Vertical position of a scale line/label given its fraction of the
+    // meter height (0 = top = 0 dB, 1 = bottom = -60 dB).
+    function lineY(f: float) -> length {
+        return root.height * f;
+    }
+    function labelY(f: float) -> length {
+        return root.height * f - 5px;
+    }
+
+    LevelMeter {
+        x: 0px;
+        y: 0px;
+        width: 14px;
+        height: parent.height;
+        accessible-role: AccessibleRole.none;
+        level: root.level;
+        peak: root.peak;
+    }
+
+    // Scale ticks + labels at 0, -12, -24, -36, -48 and -60 dB
+    Rectangle { x: 16px; y: root.lineY(0.0); width: 4px; height: 1px; background: #707078; }
+    Text { x: 22px; y: root.labelY(0.0); text: "0"; font-size: 8px; color: #707078; }
+    Rectangle { x: 16px; y: root.lineY(0.2); width: 4px; height: 1px; background: #707078; }
+    Text { x: 22px; y: root.labelY(0.2); text: "-12"; font-size: 8px; color: #707078; }
+    Rectangle { x: 16px; y: root.lineY(0.4); width: 4px; height: 1px; background: #707078; }
+    Text { x: 22px; y: root.labelY(0.4); text: "-24"; font-size: 8px; color: #707078; }
+    Rectangle { x: 16px; y: root.lineY(0.6); width: 4px; height: 1px; background: #707078; }
+    Text { x: 22px; y: root.labelY(0.6); text: "-36"; font-size: 8px; color: #707078; }
+    Rectangle { x: 16px; y: root.lineY(0.8); width: 4px; height: 1px; background: #707078; }
+    Text { x: 22px; y: root.labelY(0.8); text: "-48"; font-size: 8px; color: #707078; }
+    Rectangle { x: 16px; y: root.lineY(1.0); width: 4px; height: 1px; background: #707078; }
+    Text { x: 22px; y: root.labelY(1.0); text: "-60"; font-size: 8px; color: #707078; }
+}
+
+// Bypass switch for a DSP section (compressor / delay). The preamp has no// bypass: it is the heart of the plugin and always runs.
 component SectionToggle inherits Rectangle {
     in-out property <bool> on: false;
     callback toggled(bool);
@@ -450,14 +491,13 @@ export component PreVocalUI inherits Window {
                     padding-bottom: 50px;
                     spacing: 8px;
                     alignment: LayoutAlignment.end;
-                    cross-axis-alignment: CrossAxisAlignment.center;
-                    width: 25px;
+                    cross-axis-alignment: CrossAxisAlignment.start;
+                    width: 54px;
                     vertical-stretch: 1;
-                    LevelMeter {
+                    MeterWithScale {
                         accessible-role: AccessibleRole.none;
                         level: root.input-level;
                         peak: root.input-peak;
-                        width: 14px;
                         vertical-stretch: 1;
                     }
                     Text { text: "IN";
@@ -811,13 +851,13 @@ export component PreVocalUI inherits Window {
                     padding-bottom: 50px;
                     spacing: 8px;
                     alignment: LayoutAlignment.end;
-                    cross-axis-alignment: CrossAxisAlignment.center;
-                    width: 25px;
+                    cross-axis-alignment: CrossAxisAlignment.start;
+                    width: 54px;
                     vertical-stretch: 0;
-                    LevelMeter {
+                    MeterWithScale {
+                        accessible-role: AccessibleRole.none;
                         level: root.output-level;
                         peak: root.output-peak;
-                        width: 14px;
                         vertical-stretch: 1;
                     }
                     Text { overflow: TextOverflow.clip;
