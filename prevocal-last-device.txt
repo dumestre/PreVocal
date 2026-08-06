@@ -1,4 +1,4 @@
-ASIO
-Steinberg built-in ASIO Driver
-Steinberg built-in ASIO Driver
-Steinberg built-in ASIO Driver
+WASAPI
+
+Microfone (Realtek(R) Audio)
+Alto-falantes (Realtek(R) Audio)

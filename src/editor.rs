@@ -397,7 +397,7 @@ fn create_editor_ui(
     let preset_names: Vec<slint::SharedString> =
         preset_names().iter().map(|s| (*s).into()).collect();
     ui.set_preset_names(slint::ModelRc::new(slint::VecModel::from(preset_names)));
-    ui.set_preset_index(0);
+    ui.invoke_sync_preset_index(0);
     apply_param_values(&ui, params);
 
     // Continuous repaint + forced full repaint on restore/focus (see

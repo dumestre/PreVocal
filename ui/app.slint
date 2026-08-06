@@ -1,7 +1,7 @@
 // PreVocal — Vocal Bus Preamp
 // Dark Studio Pro / Anodized Metal theme with Neon Purple accents.
 
-import { ComboBox, LineEdit } from "std-widgets.slint";
+import { ComboBox, LineEdit, Palette } from "std-widgets.slint";
 import { ControlKnob } from "knob.slint";
 import { VerticalFader } from "fader.slint";
 
@@ -141,6 +141,10 @@ export component PreVocalUI inherits Window {
     preferred-height: 720px;
     title: "PreVocal — Vocal Bus Preamp";
     background: #121214;
+    // Force the std-widgets theme to dark: in a DAW the plugin view is a
+    // child window that doesn't report the OS color scheme, so the widgets
+    // would otherwise fall back to the bright (white) theme.
+    init => { Palette.color-scheme = ColorScheme.dark; }
     // When embedded in a DAW the host owns the frame: no title bar, no
     // close/minimize/maximize buttons (the plugin editor sets this to true).
     in-out property <bool> plugin-mode: false;
@@ -199,6 +203,14 @@ export component PreVocalUI inherits Window {
     callback restart-clicked();
     callback refresh-clicked();
     callback preset-selected(int);
+
+    // Keeps the dropdown text and `preset-index` in sync. Writing the ComboBox's
+    // `current-index` directly is required: a one-way binding on it is silently
+    // broken the first time the user picks an item from the popup.
+    public function sync-preset-index(index: int) {
+        root.preset-index = index;
+        presetCombo.current-index = index;
+    }
 
     // Formata um valor de frequência como um knob real: 20 Hz, 200 Hz, 2 kHz, 12.5 kHz
     pure function freqLabel(f: float) -> string {
@@ -550,8 +562,9 @@ export component PreVocalUI inherits Window {
                             height: parent.height;
                             clicked => {
                                 let i = root.preset-index - 1;
-                                root.preset-index = i < 0 ? root.preset-names.length - 1 : i;
-                                root.preset-selected(root.preset-index);
+                                let j = i < 0 ? root.preset-names.length - 1 : i;
+                                root.sync-preset-index(j);
+                                root.preset-selected(j);
                             }
                         }
                     }
@@ -560,7 +573,6 @@ export component PreVocalUI inherits Window {
                     presetCombo := ComboBox {
                         min-width: 220px;
                         model: root.preset-names;
-                        current-index: root.preset-index;
                         selected(v) => {
                             root.preset-index = presetCombo.current-index;
                             root.preset-selected(root.preset-index);
@@ -590,8 +602,9 @@ export component PreVocalUI inherits Window {
                             height: parent.height;
                             clicked => {
                                 let i = root.preset-index + 1;
-                                root.preset-index = i >= root.preset-names.length ? 0 : i;
-                                root.preset-selected(root.preset-index);
+                                let j = i >= root.preset-names.length ? 0 : i;
+                                root.sync-preset-index(j);
+                                root.preset-selected(j);
                             }
                         }
                     }

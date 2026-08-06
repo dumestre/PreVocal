@@ -1266,7 +1266,7 @@ fn run_gui(
 
     let preset_names: Vec<String> = preset_names().iter().map(|s| s.to_string()).collect();
     ui.set_preset_names(string_model(&preset_names));
-    ui.set_preset_index(0);
+    ui.invoke_sync_preset_index(0);
 
     {
         let mgr = manager.lock().unwrap();
