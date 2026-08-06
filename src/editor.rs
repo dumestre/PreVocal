@@ -180,13 +180,21 @@ fn resize_editor_window(
     });
 }
 
-/// The preferred size at the current host DPI scale factor (physical pixels).
+/// The preferred size at the current host DPI scale factor (physical pixels),
+/// clamped to the monitor's work area so the plugin never exceeds the screen.
 fn preferred_physical_size() -> slint::PhysicalSize {
     let sf = *SCALE_FACTOR.lock().unwrap() as f32;
-    slint::PhysicalSize::new(
+    let mut size = slint::PhysicalSize::new(
         (LOGICAL_WIDTH * sf).round() as u32,
         (LOGICAL_HEIGHT * sf).round() as u32,
-    )
+    );
+    if let Some(hwnd) = *PARENT_WINDOW.lock().unwrap() {
+        if let Some(mon) = monitor_work_area(hwnd) {
+            size.width = size.width.min(mon.width);
+            size.height = size.height.min(mon.height);
+        }
+    }
+    size
 }
 
 /// Client size (physical pixels) of the host's plugin view. The child window is
@@ -207,42 +215,72 @@ fn host_view_size(hwnd: NonZeroIsize) -> Option<slint::winit_030::winit::dpi::Ph
         .then_some(slint::winit_030::winit::dpi::PhysicalSize::new(width, height))
 }
 
+/// Work area (physical pixels) of the monitor nearest to `hwnd` (the screen
+/// minus the taskbar). The plugin window must never be larger than the screen:
+/// hosts often size the plugin view beyond the display (some add chrome on top
+/// of the requested size), which pushes the child window off-screen and leaves
+/// ghost trails while dragging.
+fn monitor_work_area(hwnd: NonZeroIsize) -> Option<slint::winit_030::winit::dpi::PhysicalSize<u32>> {
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+
+    let monitor = unsafe { MonitorFromWindow(hwnd.get() as _, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_null() {
+        return None;
+    }
+    let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+    // SAFETY: `info` is a valid MONITORINFO of the right size, `monitor` is a
+    // live HMONITOR from MonitorFromWindow above.
+    if unsafe { GetMonitorInfoW(monitor as HMONITOR, &mut info) } == 0 {
+        return None;
+    }
+    let rect = info.rcWork;
+    let width = (rect.right - rect.left).max(0) as u32;
+    let height = (rect.bottom - rect.top).max(0) as u32;
+    (width > 0 && height > 0)
+        .then_some(slint::winit_030::winit::dpi::PhysicalSize::new(width, height))
+}
+
+/// Clamp a physical size so it never exceeds the monitor work area.
+fn clamp_to_monitor(
+    hwnd: NonZeroIsize,
+    size: slint::winit_030::winit::dpi::PhysicalSize<u32>,
+) -> slint::winit_030::winit::dpi::PhysicalSize<u32> {
+    match monitor_work_area(hwnd) {
+        Some(mon) => {
+            slint::winit_030::winit::dpi::PhysicalSize::new(
+                size.width.min(mon.width),
+                size.height.min(mon.height),
+            )
+        }
+        None => size,
+    }
+}
+
 /// Keep the embedded (software-rendered) window repainting robustly inside the
 /// DAW's view. The software renderer uses a partial-repaint cache: when the OS
 /// discards the window's content (minimize, cover by another app, host hiding
 /// the view) the cache still believes nothing changed, so nothing is presented
-/// again and the view stays black. Also, without a continuous repaint the child
-/// window leaves ghost trails while it is dragged around in the host. This
-/// registers a winit event filter that:
+/// again and the view stays black. Also, while the plugin view is dragged
+/// around in the host, uncovered areas must be repainted or ghost trails stay
+/// behind. This registers a winit event filter that repaints on demand:
 ///
-/// - re-arms a redraw on every `RedrawRequested`, giving a continuous repaint
-///   loop (auto-stalled while the window is hidden, because Windows only
-///   delivers `WM_PAINT` to visible windows),
-/// - on `Occluded(false)`/`Focused(true)` forces a full repaint by bouncing the
+/// - `Moved`: repaint while the host drags the plugin view,
+/// - `Occluded(false)`/`Focused(true)`: forces a full repaint by bouncing the
 ///   window size 1px, which invalidates the partial-repaint cache so the next
 ///   frame is re-rendered completely.
+///
+/// No continuous repaint loop: rendering every frame at 60 FPS on the software
+/// renderer would keep the CPU busy forever and can stall the DAW.
 ///
 /// Every window event is logged to `C:\temp\prevocal_plugin.log` (TRACE level)
 /// so the repaint/black-screen behaviour can be diagnosed from the host.
 fn install_redraw_event_filter(window: &slint::Window) {
-    let mut redraws_since_report = 0u64;
-    let mut last_report = std::time::Instant::now();
     tracing::info!("editor: installing redraw event filter");
     window.on_winit_window_event(move |window, event| {
         match event {
-            WindowEvent::RedrawRequested => {
-                redraws_since_report += 1;
-                let now = std::time::Instant::now();
-                if now.duration_since(last_report) >= std::time::Duration::from_secs(2) {
-                    tracing::debug!(
-                        "editor: redraws in last 2s = {} (continuous repaint loop alive)",
-                        redraws_since_report
-                    );
-                    redraws_since_report = 0;
-                    last_report = now;
-                }
-                window.request_redraw();
-            }
             WindowEvent::Occluded(occluded) => {
                 tracing::info!("editor: window event Occluded({})", occluded);
                 if !*occluded {
@@ -275,14 +313,16 @@ fn install_redraw_event_filter(window: &slint::Window) {
                     window.request_redraw();
                 }
             }
+            // The host is moving the plugin view: repaint so dragged areas
+            // don't leave ghost trails behind.
+            WindowEvent::Moved(_) => {
+                window.request_redraw();
+            }
             WindowEvent::Resized(size) => {
                 tracing::info!("editor: window event Resized({}x{})", size.width, size.height);
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 tracing::info!("editor: window event ScaleFactorChanged({})", scale_factor);
-            }
-            WindowEvent::Moved(pos) => {
-                tracing::debug!("editor: window event Moved({:?})", pos);
             }
             _ => {}
         }
@@ -602,6 +642,9 @@ fn editor_thread_loop(
             // the host never calls `set_size`/`onSize`. The host can still
             // override this later through `set_size`.
             if let Some(size) = host_view_size(hwnd) {
+                // Never larger than the screen: hosts can size the view beyond
+                // the display (ghost trails / off-screen UI while dragging).
+                let size = clamp_to_monitor(hwnd, size);
                 tracing::info!("Sizing child window to host view: {:?}", size);
                 attrs.inner_size = Some(nice_plug::editor::dpi::Size::Physical(size));
             }
@@ -713,6 +756,20 @@ impl Editor for SlintEditor {
     }
 
     fn size(&self) -> Size {
+        // Report a preferred size that fits the screen: hosts that create the
+        // plugin view at this size (plus their own chrome) would otherwise
+        // overflow small displays (e.g. a 1366x768 laptop).
+        if let Some(hwnd) = *PARENT_WINDOW.lock().unwrap() {
+            if let Some(mon) = monitor_work_area(hwnd) {
+                let sf = *SCALE_FACTOR.lock().unwrap();
+                let max_w = mon.width as f64 / sf;
+                let max_h = mon.height as f64 / sf;
+                return Size::Logical(LogicalSize::new(
+                    (LOGICAL_WIDTH as f64).min(max_w),
+                    (LOGICAL_HEIGHT as f64).min(max_h),
+                ));
+            }
+        }
         Size::Logical(LogicalSize::new(LOGICAL_WIDTH as f64, LOGICAL_HEIGHT as f64))
     }
 
@@ -793,16 +850,25 @@ impl Editor for SlintEditor {
     }
 
     fn set_size(&self, physical_size: PhysicalSize<u32>) -> bool {
+        // The host resized its view; keep the child window filling it, but
+        // never larger than the screen (some hosts grow the view beyond the
+        // display). The size is also stashed in case the event loop isn't
+        // running yet (the editor thread applies it right after the window
+        // is created).
+        let clamped = if let Some(hwnd) = *PARENT_WINDOW.lock().unwrap() {
+            clamp_to_monitor(hwnd, physical_size)
+        } else {
+            physical_size
+        };
         tracing::info!(
-            "Editor::set_size({}x{})",
+            "Editor::set_size({}x{}) -> clamped {}x{}",
             physical_size.width,
-            physical_size.height
+            physical_size.height,
+            clamped.width,
+            clamped.height
         );
-        // The host resized its view; keep the child window filling it. The size
-        // is also stashed in case the event loop isn't running yet (the editor
-        // thread applies it right after the window is created).
-        *PENDING_HOST_SIZE.lock().unwrap() = Some((physical_size.width, physical_size.height));
-        resize_editor_window(&self.active, (physical_size.width, physical_size.height));
+        *PENDING_HOST_SIZE.lock().unwrap() = Some((clamped.width, clamped.height));
+        resize_editor_window(&self.active, (clamped.width, clamped.height));
         true
     }
 }

@@ -441,7 +441,11 @@ export component PreVocalUI inherits Window {
             border-color: rgba(157, 78, 221, 0.14);
             horizontal-stretch: 1;
             vertical-stretch: 1;
-            clip: true;
+            // NOTE: no `clip: true` here and no border-radius on the image
+            // (Image has none): the software renderer used by the plugin clips
+            // in a straight rectangle, which would cover the rounded corners
+            // with the front-panel image. The corners below punch the radius
+            // out in the window color, on every renderer.
 
             // Front panel face (frente.jpg), clipped to the rounded corners
             Image {
@@ -452,6 +456,13 @@ export component PreVocalUI inherits Window {
                 source: @image-url("../src/icons/frente.png");
                 image-fit: cover;
             }
+
+            // Rounded-corner mask drawn over the image (one circle quadrant in
+            // each corner, in the window background color).
+            Rectangle { x: 0px; y: 0px; width: 22px; height: 22px; border-radius: 22px; background: #121214; }
+            Rectangle { x: parent.width - 22px; y: 0px; width: 22px; height: 22px; border-radius: 22px; background: #121214; }
+            Rectangle { x: 0px; y: parent.height - 22px; width: 22px; height: 22px; border-radius: 22px; background: #121214; }
+            Rectangle { x: parent.width - 22px; y: parent.height - 22px; width: 22px; height: 22px; border-radius: 22px; background: #121214; }
 
             // Faceplate screws on top of the panel image, one in each corner
             Image {
