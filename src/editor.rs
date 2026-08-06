@@ -137,9 +137,11 @@ fn apply_param_values(ui: &PreVocalUI, params: &PreVocalParams) {
     ui.set_comp_attack(params.comp_attack.modulated_plain_value());
     ui.set_comp_release(params.comp_release.modulated_plain_value());
     ui.set_comp_makeup(util::gain_to_db(params.comp_makeup.modulated_plain_value()));
+    ui.set_comp_bypass(params.comp_bypass.value());
     ui.set_delay_time(params.delay_time.modulated_plain_value());
     ui.set_delay_feedback(params.delay_feedback.modulated_plain_value());
     ui.set_delay_mix(params.delay_mix.modulated_plain_value());
+    ui.set_delay_bypass(params.delay_bypass.value());
     ui.set_output_trim(util::gain_to_db(params.output_trim.modulated_plain_value()));
 }
 
@@ -428,6 +430,15 @@ fn create_editor_ui(
 
     let ctx = Arc::clone(context);
     let p = Arc::clone(params);
+    ui.on_comp_bypass_toggled(move |v| {
+        let setter = ParamSetter::new(&*ctx);
+        setter.begin_set_parameter(&p.comp_bypass);
+        setter.set_parameter(&p.comp_bypass, v);
+        setter.end_set_parameter(&p.comp_bypass);
+    });
+
+    let ctx = Arc::clone(context);
+    let p = Arc::clone(params);
     ui.on_delay_time_changed(move |v| {
         let setter = ParamSetter::new(&*ctx);
         let ms = v.clamp(1.0, 1_000.0);
@@ -454,6 +465,15 @@ fn create_editor_ui(
         setter.begin_set_parameter(&p.delay_mix);
         setter.set_parameter(&p.delay_mix, pct);
         setter.end_set_parameter(&p.delay_mix);
+    });
+
+    let ctx = Arc::clone(context);
+    let p = Arc::clone(params);
+    ui.on_delay_bypass_toggled(move |v| {
+        let setter = ParamSetter::new(&*ctx);
+        setter.begin_set_parameter(&p.delay_bypass);
+        setter.set_parameter(&p.delay_bypass, v);
+        setter.end_set_parameter(&p.delay_bypass);
     });
 
     let ctx = Arc::clone(context);
@@ -644,11 +664,13 @@ impl Editor for SlintEditor {
             "comp_makeup" => {
                 ui.set_comp_makeup(util::gain_to_db(params.comp_makeup.modulated_plain_value()))
             }
+            "comp_bypass" => ui.set_comp_bypass(params.comp_bypass.value()),
             "delay_time" => ui.set_delay_time(params.delay_time.modulated_plain_value()),
             "delay_feedback" => {
                 ui.set_delay_feedback(params.delay_feedback.modulated_plain_value())
             }
             "delay_mix" => ui.set_delay_mix(params.delay_mix.modulated_plain_value()),
+            "delay_bypass" => ui.set_delay_bypass(params.delay_bypass.value()),
             "output_trim" => {
                 ui.set_output_trim(util::gain_to_db(params.output_trim.modulated_plain_value()))
             }
@@ -671,11 +693,13 @@ impl Editor for SlintEditor {
             "comp_makeup" => {
                 ui.set_comp_makeup(util::gain_to_db(params.comp_makeup.modulated_plain_value()))
             }
+            "comp_bypass" => ui.set_comp_bypass(params.comp_bypass.value()),
             "delay_time" => ui.set_delay_time(params.delay_time.modulated_plain_value()),
             "delay_feedback" => {
                 ui.set_delay_feedback(params.delay_feedback.modulated_plain_value())
             }
             "delay_mix" => ui.set_delay_mix(params.delay_mix.modulated_plain_value()),
+            "delay_bypass" => ui.set_delay_bypass(params.delay_bypass.value()),
             "output_trim" => {
                 ui.set_output_trim(util::gain_to_db(params.output_trim.modulated_plain_value()))
             }

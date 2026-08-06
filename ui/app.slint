@@ -66,6 +66,35 @@ component LevelMeter inherits Rectangle {
     }
 }
 
+// Bypass switch for a DSP section (compressor / delay). The preamp has no
+// bypass: it is the heart of the plugin and always runs.
+component SectionToggle inherits Rectangle {
+    in-out property <bool> on: false;
+    callback toggled(bool);
+
+    width: 46px;
+    height: 20px;
+    border-radius: 10px;
+    background: root.on ? #9D4EDD : #2a2a30;
+    border-width: 1px;
+    border-color: root.on ? #C77DFF : #5A5A66;
+
+    Text {
+        text: root.on ? "ON" : "OFF";
+        font-size: 9px;
+        font-weight: 600;
+        color: root.on ? #121214 : #A0A0B0;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    ta := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        clicked => { root.toggled(!root.on); }
+    }
+}
+
 export component PreVocalUI inherits Window {
     preferred-width: 1000px;
     preferred-height: 720px;
@@ -85,9 +114,11 @@ export component PreVocalUI inherits Window {
     in-out property <float> comp-attack: 5.0;
     in-out property <float> comp-release: 100.0;
     in-out property <float> comp-makeup: 0.0;
+    in-out property <bool> comp-bypass: false;
     in-out property <float> delay-time: 300.0;
     in-out property <float> delay-feedback: 30.0;
     in-out property <float> delay-mix: 15.0;
+    in-out property <bool> delay-bypass: false;
     in-out property <float> output-trim: 0.0;
     in-out property <float> input-level: 0.0;
     in-out property <float> output-level: 0.0;
@@ -113,9 +144,11 @@ export component PreVocalUI inherits Window {
     callback comp-attack-changed(float);
     callback comp-release-changed(float);
     callback comp-makeup-changed(float);
+    callback comp-bypass-toggled(bool);
     callback delay-time-changed(float);
     callback delay-feedback-changed(float);
     callback delay-mix-changed(float);
+    callback delay-bypass-toggled(bool);
     callback output-trim-changed(float);
     callback driver-selected(string);
     callback input-selected(string);
@@ -170,6 +203,19 @@ export component PreVocalUI inherits Window {
                 image-fit: contain;
                 source: @image-url("../src/icons/prevocallogo.png");
             }
+
+        
+            
+                Text {
+                text: "V1.0";
+                font-size: 12px;
+                horizontal-alignment: TextHorizontalAlignment.center;
+                color: #A0A0B0;
+                    font-family: "poppins";
+                vertical-alignment: TextVerticalAlignment.bottom;
+            }
+        
+        
             
             
             Rectangle {
@@ -181,19 +227,10 @@ export component PreVocalUI inherits Window {
                 text: "By Du Mestre";
                 font-size: 16px;
                 color: #A0A0B0;
+                font-family: "poppins";
                 vertical-alignment: center;
             }
-            Rectangle {
-                horizontal-stretch: 1;
-                width: 300px;
-                background: transparent;
-            }
-            Text {
-                text: "V1.0";
-                font-size: 12px;
-                color: #A0A0B0;
-                vertical-alignment: center;
-            }
+           
         }
     
     
@@ -222,6 +259,7 @@ export component PreVocalUI inherits Window {
                         text: "DRIVER";
                         font-size: 12px;
                         color: #A0A0B0;
+                        font-family: "";
                         vertical-alignment: center;
                     }
                     ComboBox {
@@ -457,6 +495,7 @@ export component PreVocalUI inherits Window {
                         text: "PREAMP";
                         font-size: 11px;
                         color: #A0A0B0;
+                        font-family: "poppins";
                         horizontal-alignment: TextHorizontalAlignment.center;
                         letter-spacing: 3px;
                     }
@@ -567,14 +606,28 @@ export component PreVocalUI inherits Window {
                         drop-shadow-blur: 0px;
                         drop-shadow-color: #2f4f4f8f;
                         drop-shadow-offset-y: 0px; 
-                    Text {
-                        text: "COMPRESSOR";
-                        font-size: 11px;
-                        color: #A0A0B0;
-                        horizontal-alignment: TextHorizontalAlignment.center;
-                        letter-spacing: 3px;
+                        HorizontalLayout {
+                            width: parent.width;
+                            spacing: 10px;
+                            alignment: LayoutAlignment.center;
+                            cross-axis-alignment: CrossAxisAlignment.center;
+                            Text {
+                                text: "COMPRESSOR";
+                                font-size: 11px;
+                                color: #A0A0B0;
+                                font-family: "poppins";
+                                horizontal-alignment: TextHorizontalAlignment.center;
+                                letter-spacing: 3px;
+                            }
+                            SectionToggle {
+                                on: root.comp-bypass;
+                                toggled(v) => {
+                                    root.comp-bypass = v;
+                                    root.comp-bypass-toggled(v);
+                                }
+                            }
+                        }
                     }
-                }
 
                     HorizontalLayout {
                         spacing: 30px;
@@ -673,14 +726,28 @@ export component PreVocalUI inherits Window {
                         drop-shadow-blur: 0px;
                         drop-shadow-color: #2f4f4f8f;
                         drop-shadow-offset-y: 0px; 
-                    Text {
-                        text: "DELAY";
-                        font-size: 11px;
-                        color: #A0A0B0;
-                        horizontal-alignment: TextHorizontalAlignment.center;
-                        letter-spacing: 3px;
+                        HorizontalLayout {
+                            width: parent.width;
+                            spacing: 10px;
+                            alignment: LayoutAlignment.center;
+                            cross-axis-alignment: CrossAxisAlignment.center;
+                            Text {
+                                text: "DELAY";
+                                font-size: 11px;
+                                color: #A0A0B0;
+                                font-family: "poppins";
+                                horizontal-alignment: TextHorizontalAlignment.center;
+                                letter-spacing: 3px;
+                            }
+                            SectionToggle {
+                                on: root.delay-bypass;
+                                toggled(v) => {
+                                    root.delay-bypass = v;
+                                    root.delay-bypass-toggled(v);
+                                }
+                            }
+                        }
                     }
-                }
 
                     HorizontalLayout {
                         spacing: 30px;
@@ -691,7 +758,8 @@ export component PreVocalUI inherits Window {
                             alignment: center;
                             cross-axis-alignment: CrossAxisAlignment.center;
 
-                            Text { text: "TIME"; font-size: 12px; color: #A0A0B0; }
+                            Text { text: "TIME"; font-size: 12px; color: #A0A0B0;
+                                font-family: ""; }
                             ControlKnob {
                                 minimum: 1.0;
                                 maximum: 1000.0;
@@ -707,7 +775,8 @@ export component PreVocalUI inherits Window {
                             alignment: center;
                             cross-axis-alignment: CrossAxisAlignment.center;
 
-                            Text { text: "FEEDBACK"; font-size: 12px; color: #A0A0B0; }
+                            Text { text: "FEEDBACK"; font-size: 12px; color: #A0A0B0;
+                                font-family: ""; }
                             ControlKnob {
                                 minimum: 0.0;
                                 maximum: 90.0;

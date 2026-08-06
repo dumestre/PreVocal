@@ -52,6 +52,9 @@ pub struct PreVocalParams {
     #[id = "air"]
     pub air: FloatParam,
 
+    #[id = "comp_bypass"]
+    pub comp_bypass: BoolParam,
+
     #[id = "comp_thresh"]
     pub comp_thresh: FloatParam,
 
@@ -66,6 +69,9 @@ pub struct PreVocalParams {
 
     #[id = "comp_makeup"]
     pub comp_makeup: FloatParam,
+
+    #[id = "delay_bypass"]
+    pub delay_bypass: BoolParam,
 
     #[id = "delay_time"]
     pub delay_time: FloatParam,
@@ -142,6 +148,8 @@ impl Default for PreVocalParams {
             .with_unit(" dB")
             .with_value_to_string(formatters::v2s_f32_rounded(1)),
 
+            comp_bypass: BoolParam::new("Compressor Bypass", false),
+
             comp_thresh: FloatParam::new(
                 "Comp Threshold",
                 -18.0,
@@ -202,6 +210,8 @@ impl Default for PreVocalParams {
             .with_unit(" dB")
             .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+
+            delay_bypass: BoolParam::new("Delay Bypass", false),
 
             delay_time: FloatParam::new(
                 "Delay Time",
@@ -483,6 +493,9 @@ pub fn highshelf_2p_coeffs(freq: f32, db_gain: f32, sample_rate: f32) -> BiquadC
 /// Process a single sample through the complete PreVocal chain:
 ///
 /// `input -> Drive (tanh) -> HPF -> LPF -> Air (high-shelf) -> Compressor -> Output Trim`
+///
+/// When `comp_bypass` is set the compressor's envelope keeps tracking the
+/// signal (so re-enabling it doesn't pump), but no gain is applied.
 #[allow(clippy::too_many_arguments)]
 pub fn process_sample(
     input: f32,
@@ -496,13 +509,19 @@ pub fn process_sample(
     air_state: &mut BiquadState,
     comp: &CompressorCoefs,
     comp_state: &mut CompressorState,
+    comp_bypass: bool,
 ) -> f32 {
     let mut x = input * drive;
     x = x.tanh();
     let y = hpf_state.process(x, hpf);
     let w = lpf_state.process(y, lpf);
     let z = air_state.process(w, air);
-    let c = comp_state.process(z, comp);
+    let c = if comp_bypass {
+        comp_state.process(z, comp);
+        z
+    } else {
+        comp_state.process(z, comp)
+    };
     c * trim
 }
 
@@ -527,9 +546,11 @@ struct BlockParams {
     comp_attack_ms: f32,
     comp_release_ms: f32,
     comp_makeup_db: f32,
+    comp_bypass: bool,
     delay_time_ms: f32,
     delay_feedback_pct: f32,
     delay_mix_pct: f32,
+    delay_bypass: bool,
     trim: f32,
 }
 
@@ -579,9 +600,11 @@ impl PreVocalDsp {
             comp_attack_ms: self.params.comp_attack.smoothed.next_step(steps),
             comp_release_ms: self.params.comp_release.smoothed.next_step(steps),
             comp_makeup_db: util::gain_to_db(self.params.comp_makeup.smoothed.next_step(steps)),
+            comp_bypass: self.params.comp_bypass.value(),
             delay_time_ms: self.params.delay_time.smoothed.next_step(steps),
             delay_feedback_pct: self.params.delay_feedback.smoothed.next_step(steps),
             delay_mix_pct: self.params.delay_mix.smoothed.next_step(steps),
+            delay_bypass: self.params.delay_bypass.value(),
             trim: self.params.output_trim.smoothed.next_step(steps),
         })
     }
@@ -644,6 +667,7 @@ impl PreVocalDsp {
                     &mut air,
                     &comp_coefs,
                     &mut comp,
+                    p.comp_bypass,
                 );
             }
             self.filter_states[channel] = ChannelFilter { hpf, lpf, air, comp };
@@ -651,14 +675,16 @@ impl PreVocalDsp {
 
         // Stereo delay at the end of the chain: the principal signal stays mono,
         // only the echo taps are stereo.
-        #[allow(clippy::needless_range_loop)]
-        for frame in 0..num_frames {
-            let left = channels[0][frame];
-            let right = if stereo { channels[1][frame] } else { left };
-            let (out_l, out_r) = self.delay.process(left, right, &delay_coefs, stereo);
-            channels[0][frame] = out_l;
-            if stereo {
-                channels[1][frame] = out_r;
+        if !p.delay_bypass {
+            #[allow(clippy::needless_range_loop)]
+            for frame in 0..num_frames {
+                let left = channels[0][frame];
+                let right = if stereo { channels[1][frame] } else { left };
+                let (out_l, out_r) = self.delay.process(left, right, &delay_coefs, stereo);
+                channels[0][frame] = out_l;
+                if stereo {
+                    channels[1][frame] = out_r;
+                }
             }
         }
     }
@@ -694,17 +720,20 @@ impl PreVocalDsp {
                     &mut air,
                     &comp_coefs,
                     &mut comp,
+                    p.comp_bypass,
                 );
                 self.filter_states[channel] = ChannelFilter { hpf, lpf, air, comp };
             }
             // Stereo delay at the end of the chain (mono principal, stereo taps).
-            let idx = frame * num_channels;
-            let left = samples[idx];
-            let right = if stereo { samples[idx + 1] } else { left };
-            let (out_l, out_r) = self.delay.process(left, right, &delay_coefs, stereo);
-            samples[idx] = out_l;
-            if stereo {
-                samples[idx + 1] = out_r;
+            if !p.delay_bypass {
+                let idx = frame * num_channels;
+                let left = samples[idx];
+                let right = if stereo { samples[idx + 1] } else { left };
+                let (out_l, out_r) = self.delay.process(left, right, &delay_coefs, stereo);
+                samples[idx] = out_l;
+                if stereo {
+                    samples[idx + 1] = out_r;
+                }
             }
         }
     }
