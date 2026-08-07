@@ -3088,7 +3088,6 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 [[package]]
 name = "nice-log"
 version = "0.3.1"
-source = "git+https://codeberg.org/RustAudio/nice-plug?tag=v0.2.3#42f480568d383632bbcb2f29d0e4349b93566432"
 dependencies = [
  "tracing-appender",
  "windows",
@@ -3097,7 +3096,6 @@ dependencies = [
 [[package]]
 name = "nice-plug"
 version = "0.2.3"
-source = "git+https://codeberg.org/RustAudio/nice-plug?tag=v0.2.3#42f480568d383632bbcb2f29d0e4349b93566432"
 dependencies = [
  "anyhow",
  "anymap3",
@@ -3126,7 +3124,6 @@ dependencies = [
 [[package]]
 name = "nice-plug-core"
 version = "0.2.0"
-source = "git+https://codeberg.org/RustAudio/nice-plug?tag=v0.2.3#42f480568d383632bbcb2f29d0e4349b93566432"
 dependencies = [
  "atomic_float",
  "atomic_refcell",
@@ -3145,7 +3142,6 @@ dependencies = [
 [[package]]
 name = "nice-plug-derive"
 version = "0.1.2"
-source = "git+https://codeberg.org/RustAudio/nice-plug?tag=v0.2.3#42f480568d383632bbcb2f29d0e4349b93566432"
 dependencies = [
  "proc-macro2",
  "quote",

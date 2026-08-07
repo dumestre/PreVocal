@@ -351,6 +351,10 @@ impl Plugin for PreVocal {
             .is_ok(),
         )
     }
+
+    fn exit_dll() {
+        editor::shutdown_editor_thread();
+    }
 }
 
 impl ClapPlugin for PreVocal {

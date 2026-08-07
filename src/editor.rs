@@ -79,11 +79,20 @@ enum EditorMsg {
     Close {
         ack: std::sync::mpsc::Sender<()>,
     },
+    /// Terminate the thread (sent from `ExitDll` when the host unloads the
+    /// plugin DLL). The thread (and its winit event loop / windows) live
+    /// *inside* the DLL, so if it keeps running after the module is unmapped
+    /// it executes unmapped code → access violation → host crash.
+    Shutdown,
 }
 
 /// Sender end of the persistent editor-thread's channel. `None` until the
 /// thread is created on the first open (and re-created if it ever dies).
 static EDITOR_TX: Mutex<Option<std::sync::mpsc::Sender<EditorMsg>>> = Mutex::new(None);
+
+/// Join handle of the persistent editor thread. Taken (and joined) when the
+/// DLL is unloaded from `shutdown_editor_thread()`.
+static EDITOR_JOIN: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
 
 /// Set by `SlintEditorInstance::drop` (host/GUI thread) to signal the editor
 /// thread that a close is in flight. Guards against a pending quit being
@@ -216,11 +225,21 @@ pub struct SlintEditor {
 
 impl SlintEditor {
     pub fn new(params: Arc<PreVocalParams>) -> Self {
+        tracing::info!("editor: SlintEditor created (new plugin wrapper instance)");
         Self {
             params,
             active: Arc::new(Mutex::new(None)),
             context: Arc::new(Mutex::new(None)),
         }
+    }
+}
+
+impl Drop for SlintEditor {
+    fn drop(&mut self) {
+        // Diagnostic: this runs when the host destroys the plugin (delete) and
+        // the wrapper tears down. If this log never appears after a delete, the
+        // WrapperInner is being leaked (Arc cycle) instead of dropped.
+        tracing::info!("editor: SlintEditor dropped (plugin teardown)");
     }
 }
 
@@ -777,6 +796,36 @@ fn create_editor_ui(
 /// per process on a dedicated thread; the Slint backend keeps the event loop
 /// alive between `run_event_loop()` calls on the same thread, so this parks on
 /// the channel between opens and re-runs the loop for each open/close cycle.
+/// Stop the persistent editor thread. Called from the plugin's `exit_dll()`
+/// (i.e. the VST3 `ExitDll` entry point) when the host unloads the plugin DLL.
+///
+/// The thread, its winit event loop and its windows all live inside the DLL's
+/// code. If the module is unmapped while the thread is still running, the
+/// thread (and the OS, destroying the thread's windows via the winit `WndProc`)
+/// will execute unmapped code → access violation → host crash. So before the
+/// DLL goes away we must: quit any running event loop, tell the thread to exit,
+/// and join it. This runs under the loader lock (DllMain), so it must not load
+/// libraries — it doesn't.
+pub fn shutdown_editor_thread() {
+    tracing::info!("editor: shutdown requested (host unloading plugin DLL)");
+    // Wake the winit event loop if an editor window is currently open. If the
+    // loop is parked this post stays pending and dies with the thread.
+    let _ = slint::quit_event_loop();
+    // Ask the thread to exit (it breaks out of the park loop immediately).
+    if let Some(tx) = lock_mutex(&EDITOR_TX).as_ref() {
+        let _ = tx.send(EditorMsg::Shutdown);
+    }
+    // Wait for the thread to finish so no code from this DLL runs (and no
+    // window of this DLL survives) after we return and the module is unmapped.
+    // The thread exits in well under a second; if it ever wedged, joining here
+    // would block the host's unload (which is at least not a crash).
+    if let Some(handle) = lock_mutex(&EDITOR_JOIN).take() {
+        tracing::info!("editor: joining editor thread...");
+        let _ = handle.join();
+        tracing::info!("editor: editor thread joined, DLL unload safe");
+    }
+}
+
 fn editor_thread_loop(
     rx: std::sync::mpsc::Receiver<EditorMsg>,
     params: Arc<PreVocalParams>,
@@ -845,6 +894,10 @@ fn editor_thread_loop(
                 CLOSE_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
                 let _ = ack.send(());
             }
+            Ok(EditorMsg::Shutdown) => {
+                tracing::info!("editor: received Shutdown — thread exiting (DLL unloading)");
+                break;
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 heartbeat = heartbeat.wrapping_add(1);
                 if heartbeat % 10 == 1 {
@@ -894,10 +947,11 @@ impl Editor for SlintEditor {
         });
         if needs_thread {
             let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::Builder::new()
+            let handle = std::thread::Builder::new()
                 .name("prevocal-editor".into())
                 .spawn(move || editor_thread_loop(rx, params, active))
                 .expect("failed to spawn the editor thread");
+            *lock_mutex(&EDITOR_JOIN) = Some(handle);
             let _ = tx.send(EditorMsg::Open {
                 parent_hwnd,
                 context: Arc::clone(&context),
