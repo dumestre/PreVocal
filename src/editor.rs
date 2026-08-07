@@ -634,8 +634,16 @@ fn create_editor_ui(
 
     // Ask the host to resize its view to our preferred size. The wrapper
     // posts this to the host's GUI thread, so it's safe from here.
-    let resize_ok = context.request_resize();
-    tracing::info!("editor: request_resize() -> {}", resize_ok);
+    // NOTE: only if the host hasn't sized us yet — the Cubase beeps when a
+    // resizeView is requested right after opening, and it already sizes us
+    // itself via getSize/onSize.
+    let needs_resize = lock_mutex(&PENDING_HOST_SIZE).is_none();
+    if needs_resize {
+        let resize_ok = context.request_resize();
+        tracing::info!("editor: request_resize() -> {}", resize_ok);
+    } else {
+        tracing::info!("editor: host already sized us, skipping request_resize");
+    }
 
     let ctx = Arc::clone(context);
     let p = Arc::clone(params);
@@ -1018,9 +1026,19 @@ impl Editor for SlintEditor {
     fn set_scale_factor(&self, factor: f64) -> bool {
         tracing::info!("Editor::set_scale_factor({})", factor);
         *lock_mutex(&SCALE_FACTOR) = factor;
-        let size = preferred_physical_size();
-        tracing::info!("editor: set_scale_factor preferred {}x{}", size.width, size.height);
-        resize_editor_window(&self.active, (size.width, size.height));
+        // Prefer the host's current view size (it owns our size via onSize);
+        // fall back to our preferred logical size only if never sized by the
+        // host. Forcing the fixed preferred size here shrinks the UI back to
+        // its original size after the host resizes (min/maximize) and leaves
+        // the view clipped/misplaced.
+        let size = lock_mutex(&PENDING_HOST_SIZE).map_or_else(
+            || {
+                let s = preferred_physical_size();
+                (s.width, s.height)
+            },
+            |s| s,
+        );
+        resize_editor_window(&self.active, size);
         // NOTE: no host request_resize() here. We run on the host GUI thread
         // while the wrapper holds the editor mutex; request_resize() would
         // execute reentrantly on this same thread (main thread shortcut in
