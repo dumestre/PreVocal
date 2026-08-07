@@ -1,0 +1,572 @@
+//! This plugin demonstrates how to "bring your own GUI toolkit" using a raw OpenGL context.
+
+use baseview::{
+    WindowContext, WindowHandle, WindowOpenOptions, WindowScalePolicy,
+    dpi::{LogicalSize, Size},
+    gl::GlConfig,
+};
+use crossbeam::atomic::AtomicCell;
+use glow::Context;
+use nice_plug::params::persist::PersistentField;
+use nice_plug::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
+/// The time it takes for the peak meter to decay by 12 dB after switching to complete silence.
+const PEAK_METER_DECAY_MS: f64 = 150.0;
+
+pub struct CustomGlWindow {
+    gui_context: Arc<dyn GuiContext>,
+    gl: Arc<glow::Context>,
+    window: WindowContext,
+
+    vertex_array: glow::NativeVertexArray,
+    program: glow::NativeProgram,
+
+    #[allow(unused)]
+    params: Arc<MyPluginParams>,
+    #[allow(unused)]
+    peak_meter: Arc<AtomicF32>,
+}
+
+impl Drop for CustomGlWindow {
+    fn drop(&mut self) {
+        use glow::HasContext as _;
+
+        unsafe {
+            self.gl.delete_program(self.program);
+            self.gl.delete_vertex_array(self.vertex_array);
+        }
+    }
+}
+
+/// Helper for parsing and interpreting the OpenGL shader version. This will
+/// help ensure maximum compatibility with systems.
+/// (borrowed and modified from
+/// https://github.com/emilk/egui/blob/main/crates/egui_glow/src/shader_version.rs)
+fn get_shader_version_string(gl: &Arc<Context>) -> &'static str {
+    use glow::HasContext as _;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    if gl.version().major < 2 {
+        // this checks on desktop that we are not using opengl 1.1 microsoft sw rendering context.
+        // ShaderVersion::get fn will segfault due to SHADING_LANGUAGE_VERSION (added in gl2.0)
+        panic!("OpenGL 2.0+ is not supported on this device.");
+    }
+
+    let glsl_ver = unsafe { gl.get_parameter_string(glow::SHADING_LANGUAGE_VERSION) };
+
+    let shader_version = {
+        let start = glsl_ver.find(|c| char::is_ascii_digit(&c)).unwrap();
+        let es = glsl_ver[..start].contains(" ES ");
+        let ver = glsl_ver[start..]
+            .split_once(' ')
+            .map_or(&glsl_ver[start..], |x| x.0);
+        let [maj, min]: [u8; 2] = ver
+            .splitn(3, '.')
+            .take(2)
+            .map(|x| x.parse().unwrap_or_default())
+            .collect::<Vec<u8>>()
+            .try_into()
+            .unwrap();
+
+        // Put your supported shader versions here
+        if es {
+            if maj >= 3 {
+                "#version 300 es"
+            } else {
+                "#version 100"
+            }
+        } else if maj > 1 || (maj == 1 && min >= 40) {
+            "#version 140"
+        } else {
+            "#version 120"
+        }
+    };
+
+    nice_log!("Shader version: {shader_version} ({glsl_ver:?})");
+
+    shader_version
+}
+
+impl CustomGlWindow {
+    fn new(
+        window: WindowContext,
+        gui_context: Arc<dyn GuiContext>,
+        params: Arc<MyPluginParams>,
+        peak_meter: Arc<AtomicF32>,
+    ) -> Self {
+        use glow::HasContext as _;
+
+        // TODO: Return an error instead of panicking once baseview gets thats
+        // ability.
+        let gl_context = window
+            .gl_context()
+            .expect("failed to get baseview gl context");
+
+        let (gl, vertex_array, program) = unsafe {
+            gl_context.make_current();
+
+            #[allow(clippy::arc_with_non_send_sync)]
+            let gl = Arc::new(glow::Context::from_loader_function(|s| {
+                gl_context.get_proc_address(s)
+            }));
+
+            let shader_version = get_shader_version_string(&gl);
+
+            let vertex_array = gl
+                .create_vertex_array()
+                .expect("Cannot create vertex array");
+            gl.bind_vertex_array(Some(vertex_array));
+
+            let program = gl.create_program().expect("Cannot create program");
+
+            let (vertex_shader_source, fragment_shader_source) = (
+                r#"const vec2 verts[3] = vec2[3](
+                    vec2(0.5f, 1.0f),
+                    vec2(0.0f, 0.0f),
+                    vec2(1.0f, 0.0f)
+                );
+                out vec2 vert;
+                void main() {
+                    vert = verts[gl_VertexID];
+                    gl_Position = vec4(vert - 0.5, 0.0, 1.0);
+                }"#,
+                r#"precision mediump float;
+                in vec2 vert;
+                out vec4 color;
+                void main() {
+                    color = vec4(vert, 0.5, 1.0);
+                }"#,
+            );
+
+            let shader_sources = [
+                (glow::VERTEX_SHADER, vertex_shader_source),
+                (glow::FRAGMENT_SHADER, fragment_shader_source),
+            ];
+
+            let mut shaders = Vec::with_capacity(shader_sources.len());
+
+            for (shader_type, shader_source) in shader_sources.iter() {
+                let shader = gl
+                    .create_shader(*shader_type)
+                    .expect("Cannot create shader");
+                gl.shader_source(shader, &format!("{}\n{}", shader_version, shader_source));
+                gl.compile_shader(shader);
+                if !gl.get_shader_compile_status(shader) {
+                    panic!("{}", gl.get_shader_info_log(shader));
+                }
+                gl.attach_shader(program, shader);
+                shaders.push(shader);
+            }
+
+            gl.link_program(program);
+            if !gl.get_program_link_status(program) {
+                panic!("{}", gl.get_program_info_log(program));
+            }
+
+            for shader in shaders {
+                gl.detach_shader(program, shader);
+                gl.delete_shader(shader);
+            }
+
+            gl.use_program(Some(program));
+
+            gl_context.make_not_current();
+
+            (gl, vertex_array, program)
+        };
+
+        Self {
+            gui_context,
+            gl,
+            vertex_array,
+            program,
+            params,
+            peak_meter,
+            window,
+        }
+    }
+}
+
+impl baseview::WindowHandler for CustomGlWindow {
+    fn on_frame(&self) {
+        use glow::HasContext as _;
+        // Do rendering here.
+
+        let gl_context = self
+            .window
+            .gl_context()
+            .expect("failed to get baseview gl context");
+
+        unsafe {
+            gl_context.make_current();
+
+            self.gl.clear_color(0.05, 0.05, 0.05, 1.0);
+            self.gl.clear(glow::COLOR_BUFFER_BIT);
+
+            self.gl.draw_arrays(glow::TRIANGLES, 0, 3);
+
+            gl_context.swap_buffers();
+            gl_context.make_not_current();
+        }
+    }
+
+    fn on_event(&self, event: baseview::Event) -> baseview::EventStatus {
+        // Use this to set parameter values.
+        let _param_setter = ParamSetter::new(self.gui_context.as_ref());
+
+        // Do event processing here.
+        #[allow(clippy::match_single_binding)]
+        match &event {
+            // Do event processing here.
+            _ => {}
+        }
+
+        baseview::EventStatus::Captured
+    }
+
+    fn resized(&self, new_size: baseview::WindowSize) {
+        self.params
+            .editor_state
+            .window_scale_factor
+            .store(new_size.scale_factor as f32);
+        self.params.editor_state.size.store(new_size.logical.cast());
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CustomGlEditorState {
+    #[serde(with = "nice_plug::params::persist::serialize_atomic_cell")]
+    size: AtomicCell<LogicalSize<f32>>,
+    #[serde(skip)]
+    window_scale_factor: AtomicCell<f32>,
+    #[serde(skip)]
+    /// The scaling factor reported by the host, if any. On macOS this will never be set and we
+    /// should use the system scaling factor instead.
+    host_scale_factor: AtomicCell<Option<f32>>,
+    /// Whether the editor's window is currently open.
+    #[serde(skip)]
+    open: AtomicBool,
+}
+
+impl CustomGlEditorState {
+    pub fn from_size(size: LogicalSize<f32>) -> Arc<Self> {
+        Arc::new(Self {
+            size: AtomicCell::new(size),
+            window_scale_factor: AtomicCell::new(1.0),
+            host_scale_factor: AtomicCell::new(None),
+            open: AtomicBool::new(false),
+        })
+    }
+
+    /// Returns a `(width, height)` pair for the current size of the GUI in logical pixels.
+    pub fn size(&self) -> Size {
+        self.size.load().into()
+    }
+
+    pub fn window_scale_factor(&self) -> f32 {
+        self.window_scale_factor.load()
+    }
+
+    pub fn host_scale_factor(&self) -> Option<f32> {
+        self.host_scale_factor.load()
+    }
+
+    /// Whether the GUI is currently visible.
+    // Called `is_open()` instead of `open()` to avoid the ambiguity.
+    pub fn is_open(&self) -> bool {
+        self.open.load(Ordering::Acquire)
+    }
+}
+
+impl<'a> PersistentField<'a, CustomGlEditorState> for Arc<CustomGlEditorState> {
+    fn set(&self, new_value: CustomGlEditorState) {
+        self.size.store(new_value.size.load());
+    }
+
+    fn map<F, R>(&self, f: F) -> R
+    where
+        F: Fn(&CustomGlEditorState) -> R,
+    {
+        f(self)
+    }
+}
+
+pub struct CustomGlEditor {
+    params: Arc<MyPluginParams>,
+    peak_meter: Arc<AtomicF32>,
+}
+
+impl Editor for CustomGlEditor {
+    fn spawn(
+        &self,
+        parent: ParentWindowHandle,
+        context: Arc<dyn GuiContext>,
+    ) -> Box<dyn std::any::Any> {
+        let size = self.params.editor_state.size();
+        let host_scale_factor = self.params.editor_state.host_scale_factor();
+
+        let gui_context = Arc::clone(&context);
+
+        let params = Arc::clone(&self.params);
+        let peak_meter = Arc::clone(&self.peak_meter);
+
+        let scale_policy = host_scale_factor
+            .map(|factor| WindowScalePolicy::ScaleFactor(factor as f64))
+            .unwrap_or(WindowScalePolicy::SystemScaleFactor);
+
+        let window = baseview::Window::open_parented(
+            &parent,
+            WindowOpenOptions::new()
+                .with_title("OpenGL Window")
+                .with_size(size)
+                .with_scale_policy(scale_policy)
+                .with_gl_config(Some(GlConfig {
+                    version: (3, 2),
+                    red_bits: 8,
+                    blue_bits: 8,
+                    green_bits: 8,
+                    alpha_bits: 8,
+                    depth_bits: 24,
+                    stencil_bits: 8,
+                    samples: None,
+                    srgb: true,
+                    double_buffer: true,
+                    vsync: false,
+                    ..Default::default()
+                })),
+            move |window: WindowContext| -> CustomGlWindow {
+                CustomGlWindow::new(window, gui_context, params, peak_meter)
+            },
+        );
+
+        self.params.editor_state.open.store(true, Ordering::Release);
+        Box::new(CustomGlEditorHandle {
+            state: self.params.editor_state.clone(),
+            window,
+        })
+    }
+
+    fn size(&self) -> Size {
+        self.params.editor_state.size()
+    }
+
+    fn set_scale_factor(&self, factor: f64) -> bool {
+        // If the editor is currently open then the host must not change the current HiDPI scale as
+        // we don't have a way to handle that. Ableton Live does this.
+        if self.params.editor_state.is_open() {
+            return false;
+        }
+
+        self.params
+            .editor_state
+            .host_scale_factor
+            .store(Some(factor as f32));
+        true
+    }
+
+    fn param_value_changed(&self, _id: &str, _normalized_value: f32) {
+        // As mentioned above, for now we'll always force a redraw to allow meter widgets to work
+        // correctly. In the future we can use an `Arc<AtomicBool>` and only force a redraw when
+        // that boolean is set.
+    }
+
+    fn param_modulation_changed(&self, _id: &str, _modulation_offset: f32) {}
+
+    fn param_values_changed(&self) {
+        // Same
+    }
+}
+
+/// The window handle used for [`CustomGlEditor`].
+struct CustomGlEditorHandle {
+    state: Arc<CustomGlEditorState>,
+    window: WindowHandle,
+}
+
+impl Drop for CustomGlEditorHandle {
+    fn drop(&mut self) {
+        self.state.open.store(false, Ordering::Release);
+        // XXX: This should automatically happen when the handle gets dropped, but apparently not
+        self.window.close();
+    }
+}
+
+/// This is mostly identical to the gain example, minus some fluff, and with a GUI.
+pub struct MyPlugin {
+    params: Arc<MyPluginParams>,
+
+    /// Needed to normalize the peak meter's response based on the sample rate.
+    peak_meter_decay_weight: f32,
+    /// The current data for the peak meter. This is stored as an [`Arc`] so we can share it between
+    /// the GUI and the audio processing parts. If you have more state to share, then it's a good
+    /// idea to put all of that in a struct behind a single `Arc`.
+    ///
+    /// This is stored as voltage gain.
+    peak_meter: Arc<AtomicF32>,
+}
+
+#[derive(Params)]
+pub struct MyPluginParams {
+    /// The editor state, saved together with the parameter state so the custom scaling can be
+    /// restored.
+    #[persist = "editor-state"]
+    editor_state: Arc<CustomGlEditorState>,
+
+    #[id = "gain"]
+    pub gain: FloatParam,
+
+    #[id = "foobar"]
+    pub some_int: IntParam,
+}
+
+impl Default for MyPlugin {
+    fn default() -> Self {
+        Self {
+            params: Arc::new(MyPluginParams::default()),
+
+            peak_meter_decay_weight: 1.0,
+            peak_meter: Arc::new(AtomicF32::new(util::MINUS_INFINITY_DB)),
+        }
+    }
+}
+
+impl Default for MyPluginParams {
+    fn default() -> Self {
+        Self {
+            editor_state: CustomGlEditorState::from_size(LogicalSize::new(400.0, 300.0)),
+
+            // See the main gain example for more details
+            gain: FloatParam::new(
+                "Gain",
+                util::db_to_gain(0.0),
+                FloatRange::Skewed {
+                    min: util::db_to_gain(-30.0),
+                    max: util::db_to_gain(30.0),
+                    factor: FloatRange::gain_skew_factor(-30.0, 30.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Logarithmic(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            some_int: IntParam::new("Something", 3, IntRange::Linear { min: 0, max: 3 }),
+        }
+    }
+}
+
+impl Plugin for MyPlugin {
+    const NAME: &'static str = "BYO GUI Example (OpenGL)";
+    const VENDOR: &'static str = "Moist Plugins GmbH";
+    const URL: &'static str = "https://youtu.be/dQw4w9WgXcQ";
+    const EMAIL: &'static str = "info@example.com";
+
+    const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+
+    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
+        AudioIOLayout {
+            main_input_channels: NonZeroU32::new(2),
+            main_output_channels: NonZeroU32::new(2),
+            ..AudioIOLayout::const_default()
+        },
+        AudioIOLayout {
+            main_input_channels: NonZeroU32::new(1),
+            main_output_channels: NonZeroU32::new(1),
+            ..AudioIOLayout::const_default()
+        },
+    ];
+
+    const SAMPLE_ACCURATE_AUTOMATION: bool = true;
+
+    type SysExMessage = ();
+    type BackgroundTask = ();
+
+    fn params(&self) -> Arc<dyn Params> {
+        self.params.clone()
+    }
+
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        Some(Box::new(CustomGlEditor {
+            params: Arc::clone(&self.params),
+            peak_meter: Arc::clone(&self.peak_meter),
+        }))
+    }
+
+    fn initialize(
+        &mut self,
+        _audio_io_layout: &AudioIOLayout,
+        buffer_config: &BufferConfig,
+        _context: &mut impl InitContext<Self>,
+    ) -> bool {
+        // After `PEAK_METER_DECAY_MS` milliseconds of pure silence, the peak meter's value should
+        // have dropped by 12 dB
+        self.peak_meter_decay_weight = 0.25f64
+            .powf((buffer_config.sample_rate as f64 * PEAK_METER_DECAY_MS / 1000.0).recip())
+            as f32;
+
+        true
+    }
+
+    fn process(
+        &mut self,
+        buffer: &mut Buffer,
+        _aux: &mut AuxiliaryBuffers,
+        _context: &mut impl ProcessContext<Self>,
+    ) -> ProcessStatus {
+        for channel_samples in buffer.iter_samples() {
+            let mut amplitude = 0.0;
+            let num_samples = channel_samples.len();
+
+            let gain = self.params.gain.smoothed.next();
+            for sample in channel_samples {
+                *sample *= gain;
+                amplitude += *sample;
+            }
+
+            // To save resources, a plugin can (and probably should!) only perform expensive
+            // calculations that are only displayed on the GUI while the GUI is open
+            if self.params.editor_state.is_open() {
+                amplitude = (amplitude / num_samples as f32).abs();
+                let current_peak_meter = self.peak_meter.load(std::sync::atomic::Ordering::Relaxed);
+                let new_peak_meter = if amplitude > current_peak_meter {
+                    amplitude
+                } else {
+                    current_peak_meter * self.peak_meter_decay_weight
+                        + amplitude * (1.0 - self.peak_meter_decay_weight)
+                };
+
+                self.peak_meter
+                    .store(new_peak_meter, std::sync::atomic::Ordering::Relaxed)
+            }
+        }
+
+        ProcessStatus::Normal
+    }
+}
+
+impl ClapPlugin for MyPlugin {
+    const CLAP_ID: &'static str = "com.moist-plugins-gmbh.byo-gui-gl";
+    const CLAP_DESCRIPTION: Option<&'static str> =
+        Some("A simple example plugin with a raw OpenGL context for rendering");
+    const CLAP_MANUAL_URL: Option<&'static str> = Some(Self::URL);
+    const CLAP_SUPPORT_URL: Option<&'static str> = None;
+    const CLAP_FEATURES: &'static [ClapFeature] = &[
+        ClapFeature::AudioEffect,
+        ClapFeature::Stereo,
+        ClapFeature::Mono,
+        ClapFeature::Utility,
+    ];
+}
+
+impl Vst3Plugin for MyPlugin {
+    const VST3_CLASS_ID: [u8; 16] = *b"ByoGuiOpenGLWooo";
+    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
+        &[Vst3SubCategory::Fx, Vst3SubCategory::Tools];
+}
+
+nice_export_clap!(MyPlugin);
+nice_export_vst3!(MyPlugin);
