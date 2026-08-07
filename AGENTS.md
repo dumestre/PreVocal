@@ -34,4 +34,5 @@ Get-Item "C:\Program Files\Common Files\VST3\PreVocal.vst3","C:\Program Files\Co
 
 ## Important
 
-- **Do NOT edit cargo git checkouts** of dependencies (e.g. `C:\Users\DJDUM\.cargo\git\checkouts\nice-plug-*`): cargo re-restores them on every build. Patched crates live in `vendor/nice-plug` and are wired via `Cargo.toml` path dependencies.
+- **Do NOT edit cargo git checkouts** of dependencies (e.g. `C:\Users\DJDUM\.cargo\git\checkouts\nice-plug-*`): cargo re-restores them on every build.
+- **`vendor/nice-plug` is committed to this repo** as regular files (no submodule) and is wired via `Cargo.toml` path dependencies. All nice-plug patches (exit_dll hook, drop logs, view instrumentation) live there — commit changes to `vendor/nice-plug/**` together with the plugin code.
