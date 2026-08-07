@@ -67,10 +67,15 @@ static PENDING_HOST_SIZE: Mutex<Option<(u32, u32)>> = Mutex::new(None);
 /// open/close cycle (the Slint backend re-uses the loop across
 /// `run_event_loop()` calls on the same thread).
 enum EditorMsg {
-    /// Open the editor UI (the thread parks on the channel between opens).
+    /// Open the editor UI (the thread parks on the channel between opens). The
+    /// optional ack is signalled once the window has been created, so the
+    /// host's `attached()` can block until the editor window exists (hosts
+    /// like Cubase expect the plugin window to be there when `attached()`
+    /// returns; returning early with no window yet freezes them).
     Open {
         parent_hwnd: Option<NonZeroIsize>,
         context: Arc<dyn GuiContext>,
+        window_created: Option<std::sync::mpsc::Sender<()>>,
     },
     /// Close the editor (sent by `SlintEditorInstance`'s drop). The sender is
     /// ack'd once the editor window has actually been destroyed, so the host's
@@ -847,13 +852,25 @@ fn editor_thread_loop(
     let mut heartbeat: u32 = 0;
     loop {
         match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(EditorMsg::Open { parent_hwnd, context }) => {
+            Ok(EditorMsg::Open { parent_hwnd, context, window_created }) => {
                 tracing::info!("editor: received Open message");
                 *lock_mutex(&PARENT_WINDOW) = parent_hwnd;
 
                 let Some(ui) = create_editor_ui(&params, &active, &context) else {
+                    // Still ack so the host's `attached()` doesn't wait out the
+                    // full timeout when the window failed to be created.
+                    if let Some(ack) = window_created {
+                        let _ = ack.send(());
+                    }
                     continue;
                 };
+
+                // The window now exists. Ack the host's `attached()` call so it
+                // can proceed with a real window to parent itself to.
+                if let Some(ack) = window_created {
+                    tracing::info!("editor: window created — acking host attached()");
+                    let _ = ack.send(());
+                }
 
                 tracing::info!("editor: running event loop");
                 let result = panic::catch_unwind(|| {
@@ -904,6 +921,11 @@ fn editor_thread_loop(
                     // Heartbeat (≈ every 1s): proves this thread is alive and
                     // parked while the host is frozen.
                     tracing::debug!("editor: heartbeat — thread alive, parked");
+                    // Also prove the winit event loop thread is alive: the
+                    // closure runs on the UI thread via the event loop proxy.
+                    let _ = slint::invoke_from_event_loop(|| {
+                        tracing::info!("editor: UI thread heartbeat");
+                    });
                 }
                 // CRITICAL: answer synchronous messages from hosts (see
                 // `pump_pending_windows_messages`). Without this, a host that
@@ -937,11 +959,18 @@ impl Editor for SlintEditor {
         let params = Arc::clone(&self.params);
         let active = Arc::clone(&self.active);
 
+        // Block the host's `attached()` until the editor thread has actually
+        // created the window. Hosts like Cubase expect the plugin window to
+        // exist when `attached()` returns; returning before the window exists
+        // leaves them waiting on a window that is only born milliseconds later
+        // (on our editor thread) and the host GUI freezes.
+        let (created_tx, created_rx) = std::sync::mpsc::channel();
         let mut tx_guard = lock_mutex(&EDITOR_TX);
         let needs_thread = tx_guard.as_ref().is_none_or(|tx| {
             tx.send(EditorMsg::Open {
                 parent_hwnd,
                 context: Arc::clone(&context),
+                window_created: Some(created_tx.clone()),
             })
             .is_err()
         });
@@ -955,10 +984,15 @@ impl Editor for SlintEditor {
             let _ = tx.send(EditorMsg::Open {
                 parent_hwnd,
                 context: Arc::clone(&context),
+                window_created: Some(created_tx.clone()),
             });
             *tx_guard = Some(tx);
         }
         drop(tx_guard);
+
+        tracing::info!("editor: spawn waiting for window creation ack");
+        let _ = created_rx.recv_timeout(Duration::from_secs(2));
+        tracing::info!("editor: spawn window creation confirmed");
 
         Box::new(SlintEditorInstance {
             active: Arc::clone(&self.active),
@@ -985,11 +1019,14 @@ impl Editor for SlintEditor {
         tracing::info!("Editor::set_scale_factor({})", factor);
         *lock_mutex(&SCALE_FACTOR) = factor;
         let size = preferred_physical_size();
+        tracing::info!("editor: set_scale_factor preferred {}x{}", size.width, size.height);
         resize_editor_window(&self.active, (size.width, size.height));
-        if let Some(context) = lock_mutex(&self.context).as_ref() {
-            let resize_ok = context.request_resize();
-            tracing::info!("editor: request_resize() after scale change -> {}", resize_ok);
-        }
+        // NOTE: no host request_resize() here. We run on the host GUI thread
+        // while the wrapper holds the editor mutex; request_resize() would
+        // execute reentrantly on this same thread (main thread shortcut in
+        // nice-plug schedule_gui) and self-deadlock on that mutex (Cubase
+        // freeze). The host sizes us itself via getSize/onSize.
+        tracing::info!("editor: set_scale_factor returning true");
         true
     }
 
