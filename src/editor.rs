@@ -335,27 +335,6 @@ fn push_to_ui(active: &Mutex<Option<slint::Weak<PreVocalUI>>>, update: impl FnOn
     });
 }
 
-/// Resize the editor window to `size` (physical pixels) on the UI thread, so
-/// the child window always fills the host's view. Safe from any thread.
-fn resize_editor_window(
-    active: &Mutex<Option<slint::Weak<PreVocalUI>>>,
-    size: (u32, u32),
-) {
-    let weak = match lock_mutex(active).as_ref() {
-        Some(weak) => weak.clone(),
-        None => {
-            tracing::debug!("editor: resize to {}x{} deferred (no UI instance)", size.0, size.1);
-            return;
-        }
-    };
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(ui) = weak.upgrade() {
-            tracing::info!("editor: resizing window to {}x{}", size.0, size.1);
-            ui.window().set_size(slint::PhysicalSize::new(size.0, size.1));
-        }
-    });
-}
-
 /// The preferred size at the current host DPI scale factor (physical pixels),
 /// clamped to the monitor's work area so the plugin never exceeds the screen.
 fn preferred_physical_size() -> slint::PhysicalSize {
@@ -606,6 +585,10 @@ fn create_editor_ui(
     // called `set_size` before the event loop was running, apply that
     // size now; otherwise fall back to the logical preferred size at
     // the host's DPI scale factor.
+    // NOTE: capture "host sized us" BEFORE the take() below — after the
+    // take the slot is empty and the request_resize check would wrongly
+    // fire (Cubase beeps on a resizeView right after opening).
+    let host_sized = lock_mutex(&PENDING_HOST_SIZE).is_some();
     let initial = lock_mutex(&PENDING_HOST_SIZE).take().map_or_else(
         || {
             let s = preferred_physical_size();
@@ -637,7 +620,7 @@ fn create_editor_ui(
     // NOTE: only if the host hasn't sized us yet — the Cubase beeps when a
     // resizeView is requested right after opening, and it already sizes us
     // itself via getSize/onSize.
-    let needs_resize = lock_mutex(&PENDING_HOST_SIZE).is_none();
+    let needs_resize = !host_sized;
     if needs_resize {
         let resize_ok = context.request_resize();
         tracing::info!("editor: request_resize() -> {}", resize_ok);
@@ -1026,24 +1009,16 @@ impl Editor for SlintEditor {
     fn set_scale_factor(&self, factor: f64) -> bool {
         tracing::info!("Editor::set_scale_factor({})", factor);
         *lock_mutex(&SCALE_FACTOR) = factor;
-        // Prefer the host's current view size (it owns our size via onSize);
-        // fall back to our preferred logical size only if never sized by the
-        // host. Forcing the fixed preferred size here shrinks the UI back to
-        // its original size after the host resizes (min/maximize) and leaves
-        // the view clipped/misplaced.
-        let size = lock_mutex(&PENDING_HOST_SIZE).map_or_else(
-            || {
-                let s = preferred_physical_size();
-                (s.width, s.height)
-            },
-            |s| s,
-        );
-        resize_editor_window(&self.active, size);
-        // NOTE: no host request_resize() here. We run on the host GUI thread
-        // while the wrapper holds the editor mutex; request_resize() would
-        // execute reentrantly on this same thread (main thread shortcut in
-        // nice-plug schedule_gui) and self-deadlock on that mutex (Cubase
-        // freeze). The host sizes us itself via getSize/onSize.
+        // NOTE: no window resize and no host request_resize() here. We run on
+        // the host GUI thread while the wrapper holds the editor mutex:
+        //  - request_resize() would execute reentrantly on this same thread
+        //    (main thread shortcut in nice-plug schedule_gui) and
+        //    self-deadlock on that mutex (Cubase freeze);
+        //  - a queued winit resize would fight the host's own WM_SIZE a few
+        //    hundred ms later, shrinking the child below the host's view
+        //    (clipped/misplaced UI after minimize/restore).
+        // The host sizes us itself via getSize/onSize; we only track the
+        // scale factor for the next create_editor_ui().
         tracing::info!("editor: set_scale_factor returning true");
         true
     }
@@ -1125,7 +1100,11 @@ impl Editor for SlintEditor {
             clamped.height
         );
         *lock_mutex(&PENDING_HOST_SIZE) = Some((clamped.width, clamped.height));
-        resize_editor_window(&self.active, (clamped.width, clamped.height));
+        // No queued winit resize here: the host is about to apply this size
+        // to the view itself (WM_SIZE), and a deferred set_size would fight
+        // it moments later, leaving the child smaller than the host's view
+        // (clipped/misplaced UI). PENDING_HOST_SIZE is reapplied on the next
+        // create_editor_ui() when the window is (re)born.
         true
     }
 }
