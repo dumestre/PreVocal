@@ -1445,6 +1445,32 @@ pub fn run() {
     let sample_rate = Arc::new(AtomicU32::new(0));
     let bridge = UiBridge::new(&params, sample_rate.clone());
 
+    // Only FemtoVG is compiled in for now (OpenGL renderer).
+    let renderers = ["femtovg"];
+    let mut selected: Option<&str> = None;
+    for name in renderers {
+        match slint::BackendSelector::new()
+            .backend_name("winit".into())
+            .renderer_name(name.to_string())
+            .select()
+        {
+            Ok(_) => {
+                selected = Some(name);
+                break;
+            }
+            Err(e) => {
+                eprintln!("Failed to select Slint winit backend with {name} renderer: {e:?}. Trying next renderer...");
+            }
+        }
+    }
+    match selected {
+        Some(name) => eprintln!("Slint winit backend selected with {name} renderer"),
+        None => {
+            eprintln!("All Slint winit renderers failed. Giving up.");
+            std::process::exit(1);
+        }
+    }
+
     // The manager owns the cpal streams, which must stay alive while the GUI
     // runs, otherwise cpal stops the audio as soon as they are dropped.
     let manager = Arc::new(Mutex::new(AudioManager::new(params, sample_rate)));

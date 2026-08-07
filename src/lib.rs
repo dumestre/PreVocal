@@ -337,6 +337,7 @@ impl Plugin for PreVocal {
             tracing::subscriber::set_global_default(
                 tracing_subscriber::FmtSubscriber::builder()
                     .with_max_level(tracing::level_filters::LevelFilter::TRACE)
+                    .with_thread_names(true)
                     .with_ansi(false)
                     .with_writer(move || {
                         std::fs::OpenOptions::new()

@@ -24,7 +24,10 @@ asio = ["cpal/asio"]
 
 [dependencies]
 nice-plug = { git = "https://codeberg.org/RustAudio/nice-plug", tag = "v0.2.3", default-features = false }
-slint = { version = "1.17.1", features = ["renderer-winit-femtovg", "renderer-winit-software", "unstable-winit-030"] }
+# NOTE: Only FemtoVG is enabled for now — we want everything working on the
+# OpenGL renderer alone. Skia (slow builds) and Software are intentionally NOT
+# compiled in. If FemtoVG proves unstable, add renderer-winit-software back.
+slint = { version = "1.17.1", features = ["renderer-winit-femtovg", "unstable-winit-030"] }
 cpal = "0.18"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "smallvec"] }
