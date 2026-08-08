@@ -22,7 +22,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SizedSample};
 use nice_plug::params::InternalParamMut;
 use nice_plug::prelude::*;
-use prevocal::{preset_names, PreVocalDsp, PreVocalParams, Preset, PRESETS};
+use prevocal::{level_to_meter, preset_names, MeterState, PreVocalDsp, PreVocalParams, Preset, PRESETS};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -423,28 +423,6 @@ impl AudioEngine {
 // ---------------------------------------------------------------------
 // Meter state shared with the GUI poll thread.
 // ---------------------------------------------------------------------
-
-#[derive(Default)]
-struct MeterState {
-    in_level: f32,
-    in_peak: f32,
-    out_level: f32,
-    out_peak: f32,
-}
-
-// ---------------------------------------------------------------------
-// Meter scale. Levels are exposed to the UI as a 0..1 mapping of the
-// dBFS scale: -60 dB => 0.0, 0 dB => 1.0. The Slint meter colors the
-// zones green (< -6 dB), yellow (-6..-3 dB) and red (>= -3 dB clip).
-// ---------------------------------------------------------------------
-
-fn level_to_meter(rms: f32) -> f32 {
-    if rms <= 0.0 {
-        return 0.0;
-    }
-    let db = 20.0 * rms.log10();
-    ((db + 60.0) / 60.0).clamp(0.0, 1.0)
-}
 
 // ---------------------------------------------------------------------
 // Audio manager: enumerates hosts + devices, keeps the selected device

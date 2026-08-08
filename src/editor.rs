@@ -39,7 +39,7 @@ use nice_plug::prelude::*;
 use slint::winit_030::winit::event::WindowEvent;
 use slint::winit_030::{EventResult, WinitWindowAccessor};
 
-use crate::{preset_names, PreVocalParams, Preset, PRESETS};
+use crate::{level_to_meter, preset_names, MeterState, PreVocalParams, Preset, PRESETS};
 
 /// Parent HWND captured from `spawn()` and applied by the window-attributes hook.
 /// Only the `Win32Hwnd` variant is supported for embedding right now; other
@@ -61,6 +61,25 @@ static SCALE_FACTOR: Mutex<f64> = Mutex::new(1.0);
 /// applies this value itself once the window exists.
 static PENDING_HOST_SIZE: Mutex<Option<(u32, u32)>> = Mutex::new(None);
 
+/// Budget of window-size self-corrections left for the current editor session.
+///
+/// Some hosts (FL Studio) don't honor the size we report through
+/// [`Editor::size`]/[`request_resize`] and instead restore the plugin window
+/// at a stored size — e.g. 1000x881 instead of our 1000x720. The child window
+/// then ends up taller than the designed UI, the centered `VerticalLayout`
+/// leaves a band of empty background at the top/bottom, and the content looks
+/// shifted down. We correct the child window back to our preferred size, but
+/// only a few times per session: a host that insists on its own size would
+/// otherwise cause an endless resize fight. This is safe (no host callback is
+/// involved — the correction is a plain `SetWindowPos` on our own child), the
+/// budget just guards against pathological hosts.
+static SIZE_CORRECTIONS_LEFT: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
+/// How many times the child window may be forced back to the preferred size
+/// per editor session (see [`SIZE_CORRECTIONS_LEFT`]).
+const SIZE_CORRECTION_BUDGET: u32 = 3;
+
 /// Messages for the persistent editor-thread. winit 0.30 only allows ONE event
 /// loop per process on Windows (the `EVENT_LOOP_CREATED` flag is never reset),
 /// so the loop must live on a single thread and be re-run for every editor
@@ -74,6 +93,13 @@ enum EditorMsg {
     /// returns; returning early with no window yet freezes them).
     Open {
         parent_hwnd: Option<NonZeroIsize>,
+        /// Shared parameter state for THIS plugin instance. The persistent
+        /// thread is process-wide and reused across instances, so all
+        /// instance state (params, meters, active) must travel with each open
+        /// rather than being captured at spawn.
+        params: Arc<PreVocalParams>,
+        meters: Arc<Mutex<MeterState>>,
+        active: Arc<Mutex<Option<slint::Weak<PreVocalUI>>>>,
         context: Arc<dyn GuiContext>,
         window_created: Option<std::sync::mpsc::Sender<()>>,
     },
@@ -98,6 +124,13 @@ static EDITOR_TX: Mutex<Option<std::sync::mpsc::Sender<EditorMsg>>> = Mutex::new
 /// Join handle of the persistent editor thread. Taken (and joined) when the
 /// DLL is unloaded from `shutdown_editor_thread()`.
 static EDITOR_JOIN: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
+
+/// Join handle of the current UI-refresh thread (`spawn_ui_refresh_thread`).
+/// Joined at DLL unload: that thread also lives inside the DLL's code and
+/// would execute unmapped instructions if the module is unmapped while it is
+/// still running. Replaced on every editor open; the previous handle's thread
+/// has already exited by then (it stops as soon as its UI is gone).
+static REFRESH_JOIN: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
 
 /// Set by `SlintEditorInstance::drop` (host/GUI thread) to signal the editor
 /// thread that a close is in flight. Guards against a pending quit being
@@ -223,16 +256,19 @@ fn ensure_backend_initialized() -> bool {
 /// view to our preferred size (`request_resize`).
 pub struct SlintEditor {
     params: Arc<PreVocalParams>,
+    /// Shared realtime meter state (audio thread writes, UI poll loop reads).
+    meters: Arc<Mutex<MeterState>>,
     active: Arc<Mutex<Option<slint::Weak<PreVocalUI>>>>,
     /// Shared with `SlintEditorInstance` so the instance's `Drop` can clear it.
     context: Arc<Mutex<Option<Arc<dyn GuiContext>>>>,
 }
 
 impl SlintEditor {
-    pub fn new(params: Arc<PreVocalParams>) -> Self {
+    pub fn new(params: Arc<PreVocalParams>, meters: Arc<Mutex<MeterState>>) -> Self {
         tracing::info!("editor: SlintEditor created (new plugin wrapper instance)");
         Self {
             params,
+            meters,
             active: Arc::new(Mutex::new(None)),
             context: Arc::new(Mutex::new(None)),
         }
@@ -333,6 +369,130 @@ fn push_to_ui(active: &Mutex<Option<slint::Weak<PreVocalUI>>>, update: impl FnOn
             update(&ui);
         }
     });
+}
+
+/// Cheap read of every UI-visible parameter, used to detect changes between
+/// ticks of the UI refresh thread. Mirrors the mapping in [`apply_param_values`]
+/// (linear drive/trim converted to dB) so the fingerprint matches exactly what
+/// gets pushed to the UI.
+#[derive(Clone, Copy, PartialEq)]
+struct ParamFingerprint {
+    drive: f32,
+    hpf: f32,
+    lpf: f32,
+    air: f32,
+    comp_thresh: f32,
+    comp_ratio: f32,
+    comp_attack: f32,
+    comp_release: f32,
+    comp_makeup: f32,
+    comp_bypass: bool,
+    delay_time: f32,
+    delay_feedback: f32,
+    delay_mix: f32,
+    delay_bypass: bool,
+    output_trim: f32,
+}
+
+impl ParamFingerprint {
+    fn read(params: &PreVocalParams) -> Self {
+        Self {
+            drive: util::gain_to_db(params.drive.modulated_plain_value()),
+            hpf: params.hpf.modulated_plain_value(),
+            lpf: params.lpf.modulated_plain_value(),
+            air: params.air.modulated_plain_value(),
+            comp_thresh: params.comp_thresh.modulated_plain_value(),
+            comp_ratio: params.comp_ratio.modulated_plain_value(),
+            comp_attack: params.comp_attack.modulated_plain_value(),
+            comp_release: params.comp_release.modulated_plain_value(),
+            comp_makeup: util::gain_to_db(params.comp_makeup.modulated_plain_value()),
+            comp_bypass: params.comp_bypass.value(),
+            delay_time: params.delay_time.modulated_plain_value(),
+            delay_feedback: params.delay_feedback.modulated_plain_value(),
+            delay_mix: params.delay_mix.modulated_plain_value(),
+            delay_bypass: params.delay_bypass.value(),
+            output_trim: util::gain_to_db(params.output_trim.modulated_plain_value()),
+        }
+    }
+}
+
+/// Background thread that keeps the editor UI in sync with the realtime state.
+///
+/// This is the plugin's "refresh loop". Hosts don't reliably deliver every
+/// `param_value_changed`/`param_values_changed` while the editor is opening —
+/// nice-plug only forwards them once `is_editor_open` is set, which races the
+/// host's initial state load — so the toggles/knobs can show stale values
+/// (e.g. bypass showing OFF even though it's ON). Polling the params every
+/// 40 ms and pushing changes closes that gap for the whole UI lifetime,
+/// including preset switches and automation.
+///
+/// The same loop drives the IN/OUT meters, which the host never reports: the
+/// DSP writes RMS/peak into the shared [`MeterState`] on every audio block and
+/// this thread smooths + forwards them (same ballistics as the standalone).
+///
+/// The thread exits on its own as soon as the editor window is gone (the weak
+/// handle stops upgrading).
+fn spawn_ui_refresh_thread(
+    weak: slint::Weak<PreVocalUI>,
+    params: Arc<PreVocalParams>,
+    meters: Arc<Mutex<MeterState>>,
+) {
+    let handle = std::thread::Builder::new()
+        .name("prevocal-ui-refresh".into())
+        .spawn(move || {
+            let mut last = ParamFingerprint::read(&params);
+            let mut smooth_in = 0.0f32;
+            let mut smooth_out = 0.0f32;
+            let mut peak_in = 0.0f32;
+            let mut peak_out = 0.0f32;
+            loop {
+                // Stop when the editor window is gone (upgrade fails once the
+                // UI handle is dropped after the event loop quits).
+                if weak.upgrade().is_none() {
+                    break;
+                }
+
+                // Push parameter changes (initial state, preset loads, host
+                // automation) as soon as they diverge from what the UI shows.
+                let fp = ParamFingerprint::read(&params);
+                if fp != last {
+                    last = fp;
+                    let params = Arc::clone(&params);
+                    let _ = weak.upgrade_in_event_loop(move |ui| apply_param_values(&ui, &params));
+                }
+
+                // Meter levels with a little ballistics smoothing (same
+                // coefficients as the standalone's poll loop).
+                let m = match meters.lock() {
+                    Ok(m) => m,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                let in_lvl = m.in_level;
+                let in_pk = level_to_meter(m.in_peak);
+                let out_lvl = m.out_level;
+                let out_pk = level_to_meter(m.out_peak);
+                drop(m);
+
+                smooth_in += (in_lvl - smooth_in) * 0.45;
+                smooth_out += (out_lvl - smooth_out) * 0.45;
+                peak_in = peak_in.max(in_pk);
+                peak_out = peak_out.max(out_pk);
+                peak_in = (peak_in - 0.02).max(in_pk);
+                peak_out = (peak_out - 0.02).max(out_pk);
+
+                let _ = weak.upgrade_in_event_loop(move |ui| ui.set_input_level(smooth_in));
+                let _ = weak.upgrade_in_event_loop(move |ui| ui.set_output_level(smooth_out));
+                let _ = weak.upgrade_in_event_loop(move |ui| ui.set_input_peak(peak_in));
+                let _ = weak.upgrade_in_event_loop(move |ui| ui.set_output_peak(peak_out));
+
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        })
+        .expect("failed to spawn the UI refresh thread");
+    // Track it so DLL unload can join it before the module is unmapped. The
+    // previous session's thread (if any) is already gone — it exits when its
+    // editor window is destroyed.
+    *lock_mutex(&REFRESH_JOIN) = Some(handle);
 }
 
 /// The preferred size at the current host DPI scale factor (physical pixels),
@@ -493,6 +653,7 @@ fn install_redraw_event_filter(window: &slint::Window) {
                 let scale = window.scale_factor();
                 let logical_w = phys.width as f32 / scale;
                 let logical_h = phys.height as f32 / scale;
+                let preferred = preferred_physical_size();
                 // Query the REAL client size of the child window right now.
                 // The event size comes from WM_SIZE lParam, which can lag the
                 // actual geometry while the host is mid-resize (maximize /
@@ -538,6 +699,32 @@ fn install_redraw_event_filter(window: &slint::Window) {
                 // correct geometry.
                 if size.width > 0 && size.height > 0 {
                     window.request_redraw();
+                }
+
+                // Self-correct the child window size: hosts like FL Studio
+                // restore the plugin at a stored size (e.g. 1000x881) instead
+                // of the designed 1000x720, which pushes the centered UI down
+                // and leaves a band of empty background at the top. The event
+                // size is the authoritative client size right after the host's
+                // SetWindowPos, so it's the right signal. Ignore the bogus
+                // tiny initial events (14x14 phantom WM_SIZE) — correcting on
+                // those would waste the whole budget before the host even
+                // settles.
+                if size.width >= 200
+                    && size.height >= 200
+                    && (size.width, size.height) != (preferred.width, preferred.height)
+                    && SIZE_CORRECTIONS_LEFT.load(std::sync::atomic::Ordering::SeqCst) > 0
+                {
+                    SIZE_CORRECTIONS_LEFT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    tracing::info!(
+                        "editor: correcting child window {}x{} -> preferred {}x{} ({} corrections left)",
+                        size.width,
+                        size.height,
+                        preferred.width,
+                        preferred.height,
+                        SIZE_CORRECTIONS_LEFT.load(std::sync::atomic::Ordering::SeqCst),
+                    );
+                    window.set_size(preferred);
                 }
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
@@ -622,6 +809,7 @@ fn apply_preset(setter: &ParamSetter, params: &PreVocalParams, preset: &Preset) 
 /// backend's platform state is reused instead of re-initialized.
 fn create_editor_ui(
     params: &Arc<PreVocalParams>,
+    meters: &Arc<Mutex<MeterState>>,
     active: &Arc<Mutex<Option<slint::Weak<PreVocalUI>>>>,
     context: &Arc<dyn GuiContext>,
 ) -> Option<PreVocalUI> {
@@ -638,6 +826,11 @@ fn create_editor_ui(
     // the `.slint` `no-frame` binding, so this is what actually strips
     // the title bar and the close/minimize/maximize buttons.
     ui.set_plugin_mode(true);
+
+    // Allow self-correcting the child window size if the host restores it at
+    // a stored size that differs from our preferred 1000x720 (see
+    // `SIZE_CORRECTIONS_LEFT`).
+    SIZE_CORRECTIONS_LEFT.store(SIZE_CORRECTION_BUDGET, std::sync::atomic::Ordering::SeqCst);
 
     // Size the child window to the host's view. If the host already
     // called `set_size` before the event loop was running, apply that
@@ -843,6 +1036,11 @@ fn create_editor_ui(
     });
 
     *lock_mutex(&active) = Some(ui.as_weak());
+
+    // Keep the UI in sync with the realtime params and meters for the whole
+    // lifetime of this editor session (see `spawn_ui_refresh_thread`).
+    spawn_ui_refresh_thread(ui.as_weak(), Arc::clone(params), Arc::clone(meters));
+
     Some(ui)
 }
 
@@ -878,13 +1076,18 @@ pub fn shutdown_editor_thread() {
         let _ = handle.join();
         tracing::info!("editor: editor thread joined, DLL unload safe");
     }
+    // The UI-refresh thread also lives inside this DLL. By now the editor
+    // thread has dropped the UI, so the refresh thread's weak upgrade fails on
+    // its next tick (≤40 ms) and it exits on its own; joining guarantees it is
+    // gone before the module is unmapped.
+    if let Some(handle) = lock_mutex(&REFRESH_JOIN).take() {
+        tracing::info!("editor: joining UI refresh thread...");
+        let _ = handle.join();
+        tracing::info!("editor: UI refresh thread joined, DLL unload safe");
+    }
 }
 
-fn editor_thread_loop(
-    rx: std::sync::mpsc::Receiver<EditorMsg>,
-    params: Arc<PreVocalParams>,
-    active: Arc<Mutex<Option<slint::Weak<PreVocalUI>>>>,
-) {
+fn editor_thread_loop(rx: std::sync::mpsc::Receiver<EditorMsg>) {
     // CRITICAL: Select the backend ONCE per process, before any Slint UI code
     // runs on this thread. The platform/EventLoop is bound to the creating
     // thread and winit refuses a second event loop ("EventLoop can't be
@@ -901,11 +1104,11 @@ fn editor_thread_loop(
     let mut heartbeat: u32 = 0;
     loop {
         match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(EditorMsg::Open { parent_hwnd, context, window_created }) => {
+            Ok(EditorMsg::Open { parent_hwnd, params, meters, active, context, window_created }) => {
                 tracing::info!("editor: received Open message");
                 *lock_mutex(&PARENT_WINDOW) = parent_hwnd;
 
-                let Some(ui) = create_editor_ui(&params, &active, &context) else {
+                let Some(ui) = create_editor_ui(&params, &meters, &active, &context) else {
                     // Still ack so the host's `attached()` doesn't wait out the
                     // full timeout when the window failed to be created.
                     if let Some(ack) = window_created {
@@ -1015,6 +1218,7 @@ impl Editor for SlintEditor {
         *lock_mutex(&self.context) = Some(Arc::clone(&context));
 
         let params = Arc::clone(&self.params);
+        let meters = Arc::clone(&self.meters);
         let active = Arc::clone(&self.active);
 
         // Block the host's `attached()` until the editor thread has actually
@@ -1027,6 +1231,9 @@ impl Editor for SlintEditor {
         let needs_thread = tx_guard.as_ref().is_none_or(|tx| {
             tx.send(EditorMsg::Open {
                 parent_hwnd,
+                params: Arc::clone(&params),
+                meters: Arc::clone(&meters),
+                active: Arc::clone(&active),
                 context: Arc::clone(&context),
                 window_created: Some(created_tx.clone()),
             })
@@ -1036,11 +1243,14 @@ impl Editor for SlintEditor {
             let (tx, rx) = std::sync::mpsc::channel();
             let handle = std::thread::Builder::new()
                 .name("prevocal-editor".into())
-                .spawn(move || editor_thread_loop(rx, params, active))
+                .spawn(move || editor_thread_loop(rx))
                 .expect("failed to spawn the editor thread");
             *lock_mutex(&EDITOR_JOIN) = Some(handle);
             let _ = tx.send(EditorMsg::Open {
                 parent_hwnd,
+                params: Arc::clone(&params),
+                meters: Arc::clone(&meters),
+                active: Arc::clone(&active),
                 context: Arc::clone(&context),
                 window_created: Some(created_tx.clone()),
             });

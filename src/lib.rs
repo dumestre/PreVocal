@@ -2,7 +2,7 @@
 
 use nice_plug::prelude::*;
 use std::num::NonZeroU32;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::Once;
 use std::panic;
 
@@ -35,6 +35,36 @@ mod presets;
 use comp::{CompressorCoefs, CompressorState};
 use delay::{DelayCoefs, DelayState};
 pub use presets::{preset_names, snapshot_preset, Preset, PRESETS};
+
+// ---------------------------------------------------------------------
+// Meter scale. Levels are exposed to the UI as a 0..1 mapping of the
+// dBFS scale: -60 dB => 0.0, 0 dB => 1.0. The Slint meter colors the
+// zones green (< -6 dB), yellow (-6..-3 dB) and red (>= -3 dB clip).
+// ---------------------------------------------------------------------
+
+/// Maps an RMS amplitude to the UI's 0..1 meter level (-60 dB..0 dB).
+pub fn level_to_meter(rms: f32) -> f32 {
+    if rms <= 0.0 {
+        return 0.0;
+    }
+    let db = 20.0 * rms.log10();
+    ((db + 60.0) / 60.0).clamp(0.0, 1.0)
+}
+
+/// Realtime meter state shared between the audio thread and the UI (plugin
+/// editor or standalone). Written lock-free-ish (a short Mutex lock) from the
+/// DSP, read by a UI poll loop.
+#[derive(Default, Clone, Copy)]
+pub struct MeterState {
+    /// Smoothed input level on the UI's 0..1 scale.
+    pub in_level: f32,
+    /// Peak input amplitude (linear, 0..1).
+    pub in_peak: f32,
+    /// Smoothed output level on the UI's 0..1 scale.
+    pub out_level: f32,
+    /// Peak output amplitude (linear, 0..1).
+    pub out_peak: f32,
+}
 
 pub struct PreVocal {
     dsp: PreVocalDsp,
@@ -305,7 +335,10 @@ impl Plugin for PreVocal {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        Some(Box::new(editor::SlintEditor::new(self.dsp.params())))
+        Some(Box::new(editor::SlintEditor::new(
+            self.dsp.params(),
+            self.dsp.meters(),
+        )))
     }
 
     fn initialize(
@@ -539,6 +572,8 @@ pub struct PreVocalDsp {
     sample_rate: f32,
     filter_states: Vec<ChannelFilter>,
     delay: DelayState,
+    /// Realtime IN/OUT meter levels, shared with the UI (editor / standalone).
+    meters: Arc<Mutex<MeterState>>,
 }
 
 /// One set of smoothed parameter values shared by a whole block of audio.
@@ -568,11 +603,17 @@ impl PreVocalDsp {
             sample_rate: 48_000.0,
             filter_states: Vec::new(),
             delay: DelayState::default(),
+            meters: Arc::new(Mutex::new(MeterState::default())),
         }
     }
 
     pub fn params(&self) -> Arc<PreVocalParams> {
         self.params.clone()
+    }
+
+    /// Handle to the shared realtime meter state (audio thread writes, UI reads).
+    pub fn meters(&self) -> Arc<Mutex<MeterState>> {
+        self.meters.clone()
     }
 
     /// Set the sample rate and resync every smoother so the UI and automation always start
@@ -656,6 +697,24 @@ impl PreVocalDsp {
         let delay_coefs = self.delay_coefs(&p);
         let stereo = channels.len() > 1;
 
+        // IN meter: RMS + peak of the raw, pre-DSP input.
+        let mut in_sum_sq = 0.0f32;
+        let mut in_peak = 0.0f32;
+        for channel in channels.iter() {
+            for &s in channel.iter() {
+                in_sum_sq += s * s;
+                let a = s.abs();
+                if a > in_peak {
+                    in_peak = a;
+                }
+            }
+        }
+        let in_rms = if num_frames == 0 {
+            0.0
+        } else {
+            (in_sum_sq / (num_frames * channels.len()) as f32).sqrt()
+        };
+
         for (channel, samples) in channels.iter_mut().enumerate() {
             let mut hpf = self.filter_states[channel].hpf;
             let mut lpf = self.filter_states[channel].lpf;
@@ -693,6 +752,31 @@ impl PreVocalDsp {
                     channels[1][frame] = out_r;
                 }
             }
+        }
+
+        // OUT meter: RMS + peak of the fully processed signal.
+        let mut out_sum_sq = 0.0f32;
+        let mut out_peak = 0.0f32;
+        for channel in channels.iter() {
+            for &s in channel.iter() {
+                out_sum_sq += s * s;
+                let a = s.abs();
+                if a > out_peak {
+                    out_peak = a;
+                }
+            }
+        }
+        let out_rms = if num_frames == 0 {
+            0.0
+        } else {
+            (out_sum_sq / (num_frames * channels.len()) as f32).sqrt()
+        };
+
+        if let Ok(mut m) = self.meters.lock() {
+            m.in_level = level_to_meter(in_rms);
+            m.in_peak = in_peak;
+            m.out_level = level_to_meter(out_rms);
+            m.out_peak = out_peak;
         }
     }
 
