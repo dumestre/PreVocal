@@ -600,6 +600,12 @@ fn install_redraw_event_filter(window: &slint::Window) {
     let last_restore = Arc::new(Mutex::new(Instant::now()));
     let moved_debounce = Duration::from_millis(33);
     let restore_cooldown = Duration::from_millis(500);
+    // The size self-correction only applies shortly after the window is born:
+    // that's when hosts restore a stored size (e.g. FL's 1000x881). A later
+    // maximize/resize by the user is left alone (the correction must not fight
+    // deliberate host layout).
+    let window_born = Instant::now();
+    let correction_window = Duration::from_secs(5);
 
     window.on_winit_window_event(move |window, event| {
         match event {
@@ -709,8 +715,11 @@ fn install_redraw_event_filter(window: &slint::Window) {
                 // SetWindowPos, so it's the right signal. Ignore the bogus
                 // tiny initial events (14x14 phantom WM_SIZE) — correcting on
                 // those would waste the whole budget before the host even
-                // settles.
-                if size.width >= 200
+                // settles. Only within the first seconds after the window is
+                // born (see `correction_window`), so a user maximize/resize
+                // later in the session is never fought.
+                if window_born.elapsed() <= correction_window
+                    && size.width >= 200
                     && size.height >= 200
                     && (size.width, size.height) != (preferred.width, preferred.height)
                     && SIZE_CORRECTIONS_LEFT.load(std::sync::atomic::Ordering::SeqCst) > 0
