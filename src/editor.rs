@@ -471,7 +471,15 @@ fn install_redraw_event_filter(window: &slint::Window) {
                     window.request_redraw();
                 }
             }
-            WindowEvent::Moved(_) => {
+            WindowEvent::Moved(pos) => {
+                let win_pos = window.position();
+                tracing::info!(
+                    "editor: window event Moved event=({}, {}) win=({}, {})",
+                    pos.x,
+                    pos.y,
+                    win_pos.x,
+                    win_pos.y
+                );
                 let mut guard = lock_mutex(&last_moved);
                 if guard.elapsed() >= moved_debounce {
                     *guard = Instant::now();
@@ -480,7 +488,23 @@ fn install_redraw_event_filter(window: &slint::Window) {
                 }
             }
             WindowEvent::Resized(size) => {
-                tracing::info!("editor: window event Resized({}x{})", size.width, size.height);
+                let win_pos = window.position();
+                let phys = window.size();
+                let scale = window.scale_factor();
+                let logical_w = phys.width as f32 / scale;
+                let logical_h = phys.height as f32 / scale;
+                tracing::info!(
+                    "editor: window event Resized({}x{}) pos=({}, {}) slint-phys=({}x{}) logical=({}x{}) scale={}",
+                    size.width,
+                    size.height,
+                    win_pos.x,
+                    win_pos.y,
+                    phys.width,
+                    phys.height,
+                    logical_w,
+                    logical_h,
+                    scale
+                );
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 tracing::info!("editor: window event ScaleFactorChanged({})", scale_factor);
@@ -862,6 +886,15 @@ fn editor_thread_loop(
                     tracing::info!("editor: window created — acking host attached()");
                     let _ = ack.send(());
                 }
+
+                tracing::info!(
+                    "editor: window up slint-phys=({}x{}) pos=({}, {}) scale={}",
+                    ui.window().size().width,
+                    ui.window().size().height,
+                    ui.window().position().x,
+                    ui.window().position().y,
+                    ui.window().scale_factor()
+                );
 
                 tracing::info!("editor: running event loop");
                 let result = panic::catch_unwind(|| {
