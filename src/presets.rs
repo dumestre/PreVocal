@@ -25,6 +25,10 @@ pub struct Preset {
     pub delay_feedback_pct: f32,
     pub delay_mix_pct: f32,
     pub delay_bypass: bool,
+    pub reverb_size: f32,
+    pub reverb_damping: f32,
+    pub reverb_mix_pct: f32,
+    pub reverb_bypass: bool,
     pub trim_db: f32,
 }
 
@@ -45,6 +49,10 @@ pub const PRESETS: &[Preset] = &[
         delay_feedback_pct: 30.0,
         delay_mix_pct: 15.0,
         delay_bypass: true,
+        reverb_size: 0.5,
+        reverb_damping: 0.5,
+        reverb_mix_pct: 15.0,
+        reverb_bypass: true,
         trim_db: 0.0,
     },
     Preset {
@@ -63,6 +71,10 @@ pub const PRESETS: &[Preset] = &[
         delay_feedback_pct: 20.0,
         delay_mix_pct: 10.0,
         delay_bypass: true,
+        reverb_size: 0.4,
+        reverb_damping: 0.6,
+        reverb_mix_pct: 12.0,
+        reverb_bypass: true,
         trim_db: 0.0,
     },
     Preset {
@@ -81,6 +93,10 @@ pub const PRESETS: &[Preset] = &[
         delay_feedback_pct: 20.0,
         delay_mix_pct: 12.0,
         delay_bypass: true,
+        reverb_size: 0.6,
+        reverb_damping: 0.4,
+        reverb_mix_pct: 10.0,
+        reverb_bypass: true,
         trim_db: 0.0,
     },
     Preset {
@@ -99,6 +115,10 @@ pub const PRESETS: &[Preset] = &[
         delay_feedback_pct: 15.0,
         delay_mix_pct: 8.0,
         delay_bypass: true,
+        reverb_size: 0.3,
+        reverb_damping: 0.7,
+        reverb_mix_pct: 8.0,
+        reverb_bypass: true,
         trim_db: 0.0,
     },
     Preset {
@@ -117,6 +137,10 @@ pub const PRESETS: &[Preset] = &[
         delay_feedback_pct: 45.0,
         delay_mix_pct: 30.0,
         delay_bypass: false,
+        reverb_size: 0.5,
+        reverb_damping: 0.5,
+        reverb_mix_pct: 15.0,
+        reverb_bypass: true,
         trim_db: 0.0,
     },
     Preset {
@@ -135,6 +159,10 @@ pub const PRESETS: &[Preset] = &[
         delay_feedback_pct: 15.0,
         delay_mix_pct: 10.0,
         delay_bypass: false,
+        reverb_size: 0.7,
+        reverb_damping: 0.3,
+        reverb_mix_pct: 20.0,
+        reverb_bypass: false,
         trim_db: 0.0,
     },
 ];
@@ -164,6 +192,10 @@ pub fn snapshot_preset(name: &'static str, params: &PreVocalParams) -> Preset {
         delay_feedback_pct: params.delay_feedback.modulated_plain_value(),
         delay_mix_pct: params.delay_mix.modulated_plain_value(),
         delay_bypass: params.delay_bypass.value(),
+        reverb_size: params.reverb_size.modulated_plain_value(),
+        reverb_damping: params.reverb_damping.modulated_plain_value(),
+        reverb_mix_pct: params.reverb_mix.modulated_plain_value(),
+        reverb_bypass: params.reverb_bypass.value(),
         trim_db: nice_plug::prelude::util::gain_to_db(params.output_trim.modulated_plain_value()),
     }
 }

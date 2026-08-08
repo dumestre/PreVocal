@@ -97,6 +97,15 @@ impl UiBridge {
                 .delay_mix
                 ._internal_update_smoother(sample_rate, false);
             self.params
+                .reverb_size
+                ._internal_update_smoother(sample_rate, false);
+            self.params
+                .reverb_damping
+                ._internal_update_smoother(sample_rate, false);
+            self.params
+                .reverb_mix
+                ._internal_update_smoother(sample_rate, false);
+            self.params
                 .output_trim
                 ._internal_update_smoother(sample_rate, false);
         }
@@ -249,6 +258,41 @@ impl UiBridge {
         self.update_smoothers();
     }
 
+    fn write_reverb_size(&self, size: f32) {
+        let size = size.clamp(0.0, 1.0);
+        if !size.is_finite() {
+            return;
+        }
+        unsafe {
+            self.params.reverb_size._internal_set_plain_value(size);
+        }
+        self.update_smoothers();
+    }
+
+    fn write_reverb_damping(&self, damping: f32) {
+        let damping = damping.clamp(0.0, 1.0);
+        if !damping.is_finite() {
+            return;
+        }
+        unsafe {
+            self.params
+                .reverb_damping
+                ._internal_set_plain_value(damping);
+        }
+        self.update_smoothers();
+    }
+
+    fn write_reverb_mix(&self, pct: f32) {
+        let pct = pct.clamp(0.0, 100.0);
+        if !pct.is_finite() {
+            return;
+        }
+        unsafe {
+            self.params.reverb_mix._internal_set_plain_value(pct);
+        }
+        self.update_smoothers();
+    }
+
     /// Apply a factory preset to every parameter at once.
     fn apply_preset(&self, preset: &Preset) {
         self.write_drive(preset.drive_db);
@@ -272,6 +316,14 @@ impl UiBridge {
             self.params
                 .delay_bypass
                 ._internal_set_plain_value(preset.delay_bypass);
+        }
+        self.write_reverb_size(preset.reverb_size);
+        self.write_reverb_damping(preset.reverb_damping);
+        self.write_reverb_mix(preset.reverb_mix_pct);
+        unsafe {
+            self.params
+                .reverb_bypass
+                ._internal_set_plain_value(preset.reverb_bypass);
         }
         self.write_output_trim(preset.trim_db);
     }
@@ -322,6 +374,18 @@ impl UiBridge {
 
     fn delay_mix_value(&self) -> f32 {
         self.params.delay_mix.modulated_plain_value()
+    }
+
+    fn reverb_size_value(&self) -> f32 {
+        self.params.reverb_size.modulated_plain_value()
+    }
+
+    fn reverb_damping_value(&self) -> f32 {
+        self.params.reverb_damping.modulated_plain_value()
+    }
+
+    fn reverb_mix_value(&self) -> f32 {
+        self.params.reverb_mix.modulated_plain_value()
     }
 
     fn output_trim_value(&self) -> f32 {
@@ -1240,6 +1304,9 @@ fn run_gui(
     ui.set_delay_time(bridge.delay_time_value());
     ui.set_delay_feedback(bridge.delay_feedback_value());
     ui.set_delay_mix(bridge.delay_mix_value());
+    ui.set_reverb_size(bridge.reverb_size_value());
+    ui.set_reverb_damping(bridge.reverb_damping_value());
+    ui.set_reverb_mix(bridge.reverb_mix_value());
     ui.set_output_trim(bridge.output_trim_value());
 
     let preset_names: Vec<String> = preset_names().iter().map(|s| s.to_string()).collect();
@@ -1289,6 +1356,15 @@ fn run_gui(
     let bridge_delay_mix = Arc::clone(&bridge);
     ui.on_delay_mix_changed(move |v| bridge_delay_mix.write_delay_mix(v));
 
+    let bridge_reverb_size = Arc::clone(&bridge);
+    ui.on_reverb_size_changed(move |v| bridge_reverb_size.write_reverb_size(v));
+
+    let bridge_reverb_damping = Arc::clone(&bridge);
+    ui.on_reverb_damping_changed(move |v| bridge_reverb_damping.write_reverb_damping(v));
+
+    let bridge_reverb_mix = Arc::clone(&bridge);
+    ui.on_reverb_mix_changed(move |v| bridge_reverb_mix.write_reverb_mix(v));
+
     let bridge_trim = Arc::clone(&bridge);
     ui.on_output_trim_changed(move |v| bridge_trim.write_output_trim(v));
 
@@ -1314,6 +1390,10 @@ fn run_gui(
             ui.set_delay_feedback(bridge_preset.delay_feedback_value());
             ui.set_delay_mix(bridge_preset.delay_mix_value());
             ui.set_delay_bypass(PRESETS[idx].delay_bypass);
+            ui.set_reverb_size(bridge_preset.reverb_size_value());
+            ui.set_reverb_damping(bridge_preset.reverb_damping_value());
+            ui.set_reverb_mix(bridge_preset.reverb_mix_value());
+            ui.set_reverb_bypass(PRESETS[idx].reverb_bypass);
             ui.set_output_trim(bridge_preset.output_trim_value());
         }
     });

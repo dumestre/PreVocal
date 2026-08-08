@@ -31,9 +31,11 @@ mod comp;
 mod delay;
 mod editor;
 mod presets;
+mod reverb;
 
 use comp::{CompressorCoefs, CompressorState};
 use delay::{DelayCoefs, DelayState};
+use reverb::{ReverbCoefs, ReverbState};
 pub use presets::{preset_names, snapshot_preset, Preset, PRESETS};
 
 // ---------------------------------------------------------------------
@@ -113,6 +115,18 @@ pub struct PreVocalParams {
 
     #[id = "delay_mix"]
     pub delay_mix: FloatParam,
+
+    #[id = "reverb_bypass"]
+    pub reverb_bypass: BoolParam,
+
+    #[id = "reverb_size"]
+    pub reverb_size: FloatParam,
+
+    #[id = "reverb_damping"]
+    pub reverb_damping: FloatParam,
+
+    #[id = "reverb_mix"]
+    pub reverb_mix: FloatParam,
 
     #[id = "output_trim"]
     pub output_trim: FloatParam,
@@ -284,6 +298,37 @@ impl Default for PreVocalParams {
             .with_unit(" %")
             .with_value_to_string(formatters::v2s_f32_rounded(1)),
 
+            reverb_bypass: BoolParam::new("Reverb Bypass", true),
+
+            reverb_size: FloatParam::new(
+                "Reverb Size",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            reverb_damping: FloatParam::new(
+                "Reverb Damping",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            reverb_mix: FloatParam::new(
+                "Reverb Mix",
+                15.0,
+                FloatRange::Skewed {
+                    min: 0.0,
+                    max: 100.0,
+                    factor: FloatRange::skew_factor(15.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" %")
+            .with_value_to_string(formatters::v2s_f32_rounded(1)),
+
             output_trim: FloatParam::new(
                 "Output Trim",
                 util::db_to_gain(0.0),
@@ -392,7 +437,7 @@ impl Plugin for PreVocal {
 
 impl ClapPlugin for PreVocal {
     const CLAP_ID: &'static str = "com.prevocal.prevocal";
-    const CLAP_DESCRIPTION: Option<&'static str> = Some("Vocal Bus Preamp with soft saturation, HPF/LPF, air boost, compressor and stereo delay.");
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("Vocal Bus Preamp with soft saturation, HPF/LPF, air boost, compressor, stereo delay and reverb.");
     const CLAP_MANUAL_URL: Option<&'static str> = Some(Self::URL);
     const CLAP_SUPPORT_URL: Option<&'static str> = Some(Self::URL);
     const CLAP_FEATURES: &'static [ClapFeature] = &[
@@ -572,6 +617,7 @@ pub struct PreVocalDsp {
     sample_rate: f32,
     filter_states: Vec<ChannelFilter>,
     delay: DelayState,
+    reverb: ReverbState,
     /// Realtime IN/OUT meter levels, shared with the UI (editor / standalone).
     meters: Arc<Mutex<MeterState>>,
 }
@@ -593,6 +639,10 @@ struct BlockParams {
     delay_feedback_pct: f32,
     delay_mix_pct: f32,
     delay_bypass: bool,
+    reverb_size: f32,
+    reverb_damping: f32,
+    reverb_mix_pct: f32,
+    reverb_bypass: bool,
     trim: f32,
 }
 
@@ -603,6 +653,7 @@ impl PreVocalDsp {
             sample_rate: 48_000.0,
             filter_states: Vec::new(),
             delay: DelayState::default(),
+            reverb: ReverbState::default(),
             meters: Arc::new(Mutex::new(MeterState::default())),
         }
     }
@@ -621,6 +672,7 @@ impl PreVocalDsp {
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
         self.sample_rate = sample_rate;
         self.delay.set_sample_rate(sample_rate);
+        self.reverb.set_sample_rate(sample_rate);
         for (_, param_ptr, _) in self.params.param_map() {
             unsafe { param_ptr._internal_update_smoother(sample_rate, true) };
         }
@@ -653,6 +705,10 @@ impl PreVocalDsp {
             delay_feedback_pct: self.params.delay_feedback.smoothed.next_step(steps),
             delay_mix_pct: self.params.delay_mix.smoothed.next_step(steps),
             delay_bypass: self.params.delay_bypass.value(),
+            reverb_size: self.params.reverb_size.smoothed.next_step(steps),
+            reverb_damping: self.params.reverb_damping.smoothed.next_step(steps),
+            reverb_mix_pct: self.params.reverb_mix.smoothed.next_step(steps),
+            reverb_bypass: self.params.reverb_bypass.value(),
             trim: self.params.output_trim.smoothed.next_step(steps),
         })
     }
@@ -685,6 +741,10 @@ impl PreVocalDsp {
         )
     }
 
+    fn reverb_coefs(&self, p: &BlockParams) -> ReverbCoefs {
+        ReverbCoefs::new(p.reverb_size, p.reverb_damping, p.reverb_mix_pct)
+    }
+
     /// Process one block of audio across all channels. Parameters are read from the shared
     /// [`Arc<PreVocalParams>`] once per block, so the smoothers advance in a consistent way.
     pub fn process_block(&mut self, channels: &mut [&mut [f32]]) {
@@ -695,6 +755,7 @@ impl PreVocalDsp {
         let (hpf_coeffs, lpf_coeffs, air_coeffs) = self.coeffs_for(&p);
         let comp_coefs = self.comp_coefs(&p);
         let delay_coefs = self.delay_coefs(&p);
+        let reverb_coefs = self.reverb_coefs(&p);
         let stereo = channels.len() > 1;
 
         // IN meter: RMS + peak of the raw, pre-DSP input.
@@ -754,6 +815,21 @@ impl PreVocalDsp {
             }
         }
 
+        // Reverb last in the chain: the delay echoes (and the dry signal) hit
+        // the reverb tail, keeping the decay natural instead of echoing it.
+        if !p.reverb_bypass {
+            #[allow(clippy::needless_range_loop)]
+            for frame in 0..num_frames {
+                let left = channels[0][frame];
+                let right = if stereo { channels[1][frame] } else { left };
+                let (out_l, out_r) = self.reverb.process(left, right, &reverb_coefs);
+                channels[0][frame] = out_l;
+                if stereo {
+                    channels[1][frame] = out_r;
+                }
+            }
+        }
+
         // OUT meter: RMS + peak of the fully processed signal.
         let mut out_sum_sq = 0.0f32;
         let mut out_peak = 0.0f32;
@@ -790,6 +866,7 @@ impl PreVocalDsp {
         let (hpf_coeffs, lpf_coeffs, air_coeffs) = self.coeffs_for(&p);
         let comp_coefs = self.comp_coefs(&p);
         let delay_coefs = self.delay_coefs(&p);
+        let reverb_coefs = self.reverb_coefs(&p);
         let stereo = num_channels > 1;
 
         for frame in 0..num_frames {
@@ -821,6 +898,17 @@ impl PreVocalDsp {
                 let left = samples[idx];
                 let right = if stereo { samples[idx + 1] } else { left };
                 let (out_l, out_r) = self.delay.process(left, right, &delay_coefs, stereo);
+                samples[idx] = out_l;
+                if stereo {
+                    samples[idx + 1] = out_r;
+                }
+            }
+            // Reverb after the delay, last in the chain.
+            if !p.reverb_bypass {
+                let idx = frame * num_channels;
+                let left = samples[idx];
+                let right = if stereo { samples[idx + 1] } else { left };
+                let (out_l, out_r) = self.reverb.process(left, right, &reverb_coefs);
                 samples[idx] = out_l;
                 if stereo {
                     samples[idx + 1] = out_r;

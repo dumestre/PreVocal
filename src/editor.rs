@@ -48,7 +48,7 @@ static PARENT_WINDOW: Mutex<Option<NonZeroIsize>> = Mutex::new(None);
 
 /// Preferred editor size in logical pixels (reported to the host via
 /// [`Editor::size`]).
-const LOGICAL_WIDTH: f32 = 1000.0;
+const LOGICAL_WIDTH: f32 = 1400.0;
 const LOGICAL_HEIGHT: f32 = 720.0;
 
 /// Host DPI scale factor, set through [`Editor::set_scale_factor`]. Used to
@@ -361,6 +361,10 @@ fn apply_param_values(ui: &PreVocalUI, params: &PreVocalParams) {
     ui.set_delay_feedback(params.delay_feedback.modulated_plain_value());
     ui.set_delay_mix(params.delay_mix.modulated_plain_value());
     ui.set_delay_bypass(params.delay_bypass.value());
+    ui.set_reverb_size(params.reverb_size.modulated_plain_value());
+    ui.set_reverb_damping(params.reverb_damping.modulated_plain_value());
+    ui.set_reverb_mix(params.reverb_mix.modulated_plain_value());
+    ui.set_reverb_bypass(params.reverb_bypass.value());
     ui.set_output_trim(util::gain_to_db(params.output_trim.modulated_plain_value()));
 }
 
@@ -398,6 +402,10 @@ struct ParamFingerprint {
     delay_feedback: f32,
     delay_mix: f32,
     delay_bypass: bool,
+    reverb_size: f32,
+    reverb_damping: f32,
+    reverb_mix: f32,
+    reverb_bypass: bool,
     output_trim: f32,
 }
 
@@ -418,6 +426,10 @@ impl ParamFingerprint {
             delay_feedback: params.delay_feedback.modulated_plain_value(),
             delay_mix: params.delay_mix.modulated_plain_value(),
             delay_bypass: params.delay_bypass.value(),
+            reverb_size: params.reverb_size.modulated_plain_value(),
+            reverb_damping: params.reverb_damping.modulated_plain_value(),
+            reverb_mix: params.reverb_mix.modulated_plain_value(),
+            reverb_bypass: params.reverb_bypass.value(),
             output_trim: util::gain_to_db(params.output_trim.modulated_plain_value()),
         }
     }
@@ -814,6 +826,22 @@ fn apply_preset(setter: &ParamSetter, params: &PreVocalParams, preset: &Preset) 
     setter.set_parameter(&params.delay_bypass, preset.delay_bypass);
     setter.end_set_parameter(&params.delay_bypass);
 
+    setter.begin_set_parameter(&params.reverb_size);
+    setter.set_parameter(&params.reverb_size, preset.reverb_size);
+    setter.end_set_parameter(&params.reverb_size);
+
+    setter.begin_set_parameter(&params.reverb_damping);
+    setter.set_parameter(&params.reverb_damping, preset.reverb_damping);
+    setter.end_set_parameter(&params.reverb_damping);
+
+    setter.begin_set_parameter(&params.reverb_mix);
+    setter.set_parameter(&params.reverb_mix, preset.reverb_mix_pct);
+    setter.end_set_parameter(&params.reverb_mix);
+
+    setter.begin_set_parameter(&params.reverb_bypass);
+    setter.set_parameter(&params.reverb_bypass, preset.reverb_bypass);
+    setter.end_set_parameter(&params.reverb_bypass);
+
     setter.begin_set_parameter(&params.output_trim);
     setter.set_parameter(&params.output_trim, trim);
     setter.end_set_parameter(&params.output_trim);
@@ -1030,6 +1058,45 @@ fn create_editor_ui(
         setter.begin_set_parameter(&p.delay_bypass);
         setter.set_parameter(&p.delay_bypass, v);
         setter.end_set_parameter(&p.delay_bypass);
+    });
+
+    let ctx = Arc::clone(context);
+    let p = Arc::clone(params);
+    ui.on_reverb_size_changed(move |v| {
+        let setter = ParamSetter::new(&*ctx);
+        let size = v.clamp(0.0, 1.0);
+        setter.begin_set_parameter(&p.reverb_size);
+        setter.set_parameter(&p.reverb_size, size);
+        setter.end_set_parameter(&p.reverb_size);
+    });
+
+    let ctx = Arc::clone(context);
+    let p = Arc::clone(params);
+    ui.on_reverb_damping_changed(move |v| {
+        let setter = ParamSetter::new(&*ctx);
+        let damping = v.clamp(0.0, 1.0);
+        setter.begin_set_parameter(&p.reverb_damping);
+        setter.set_parameter(&p.reverb_damping, damping);
+        setter.end_set_parameter(&p.reverb_damping);
+    });
+
+    let ctx = Arc::clone(context);
+    let p = Arc::clone(params);
+    ui.on_reverb_mix_changed(move |v| {
+        let setter = ParamSetter::new(&*ctx);
+        let pct = v.clamp(0.0, 100.0);
+        setter.begin_set_parameter(&p.reverb_mix);
+        setter.set_parameter(&p.reverb_mix, pct);
+        setter.end_set_parameter(&p.reverb_mix);
+    });
+
+    let ctx = Arc::clone(context);
+    let p = Arc::clone(params);
+    ui.on_reverb_bypass_toggled(move |v| {
+        let setter = ParamSetter::new(&*ctx);
+        setter.begin_set_parameter(&p.reverb_bypass);
+        setter.set_parameter(&p.reverb_bypass, v);
+        setter.end_set_parameter(&p.reverb_bypass);
     });
 
     let ctx = Arc::clone(context);
@@ -1350,6 +1417,12 @@ impl Editor for SlintEditor {
             }
             "delay_mix" => ui.set_delay_mix(params.delay_mix.modulated_plain_value()),
             "delay_bypass" => ui.set_delay_bypass(params.delay_bypass.value()),
+            "reverb_size" => ui.set_reverb_size(params.reverb_size.modulated_plain_value()),
+            "reverb_damping" => {
+                ui.set_reverb_damping(params.reverb_damping.modulated_plain_value())
+            }
+            "reverb_mix" => ui.set_reverb_mix(params.reverb_mix.modulated_plain_value()),
+            "reverb_bypass" => ui.set_reverb_bypass(params.reverb_bypass.value()),
             "output_trim" => {
                 ui.set_output_trim(util::gain_to_db(params.output_trim.modulated_plain_value()))
             }
@@ -1379,6 +1452,12 @@ impl Editor for SlintEditor {
             }
             "delay_mix" => ui.set_delay_mix(params.delay_mix.modulated_plain_value()),
             "delay_bypass" => ui.set_delay_bypass(params.delay_bypass.value()),
+            "reverb_size" => ui.set_reverb_size(params.reverb_size.modulated_plain_value()),
+            "reverb_damping" => {
+                ui.set_reverb_damping(params.reverb_damping.modulated_plain_value())
+            }
+            "reverb_mix" => ui.set_reverb_mix(params.reverb_mix.modulated_plain_value()),
+            "reverb_bypass" => ui.set_reverb_bypass(params.reverb_bypass.value()),
             "output_trim" => {
                 ui.set_output_trim(util::gain_to_db(params.output_trim.modulated_plain_value()))
             }

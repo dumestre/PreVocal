@@ -116,7 +116,7 @@ component SectionToggle inherits Rectangle {
     in-out property <bool> on: false;
     callback toggled(bool);
 
-    width: 40px;
+    width: 30px;
     height: 20px;
     border-radius: 10px;
     background: root.on ? #9D4EDD : #2a2a30;
@@ -139,9 +139,89 @@ component SectionToggle inherits Rectangle {
     }
 }
 
+// Label + knob + value readout stacked column, reused inside the section cards.
+component KnobCol inherits VerticalLayout {
+    in property <string> label;
+    in property <float> minimum;
+    in property <float> maximum;
+    in property <float> default-value;
+    in-out property <float> value;
+    in property <string> display: "";
+    callback changed(float);
+
+    spacing: 10px;
+    alignment: center;
+    cross-axis-alignment: CrossAxisAlignment.center;
+
+    Text { text: root.label; font-size: 12px; color: #A0A0B0; }
+    ControlKnob {
+        minimum: root.minimum;
+        maximum: root.maximum;
+        default-value: root.default-value;
+        value <=> root.value;
+        changed(v) => { root.changed(v); }
+    }
+    Text { text: root.display; font-size: 13px; color: #C77DFF; }
+}
+
+// Label + fader + value readout stacked column.
+component FaderCol inherits VerticalLayout {
+    in property <string> label;
+    in property <float> minimum;
+    in property <float> maximum;
+    in-out property <float> value;
+    in property <string> display: "";
+    callback changed(float);
+
+    spacing: 10px;
+    alignment: center;
+    cross-axis-alignment: CrossAxisAlignment.center;
+
+    Text { text: root.label; font-size: 12px; color: #A0A0B0; }
+    VerticalFader {
+        minimum: root.minimum;
+        height: 110px;
+        maximum: root.maximum;
+        value <=> root.value;
+        changed(v) => { root.changed(v); }
+    }
+    Text { text: root.display; font-size: 13px; color: #C77DFF; }
+}
+
+// Section header strip: title + optional on/off toggle.
+component SectionHeader inherits Rectangle {
+    in property <string> label;
+    in property <bool> on;
+    in property <bool> show-toggle: true;
+    callback toggled(bool);
+
+    background: #2f4f4f8f;
+    border-radius: 6px;
+
+    HorizontalLayout {
+        width: parent.width;
+        spacing: 10px;
+        alignment: LayoutAlignment.center;
+        cross-axis-alignment: CrossAxisAlignment.center;
+        Text {
+            text: root.label;
+            font-size: 11px;
+            color: #A0A0B0;
+            font-family: "poppins";
+            horizontal-alignment: TextHorizontalAlignment.center;
+            letter-spacing: 3px;
+        }
+        if root.show-toggle: SectionToggle {
+            height: 15px;
+            on: root.on;
+            width: 25px;
+            toggled(v) => { root.toggled(v); }
+        }
+    }
+}
+
 export component PreVocalUI inherits Window {
-    preferred-width: 1000px;
-    preferred-height: 720px;
+    
     title: "PreVocal — Vocal Bus Preamp";
     background: #121214;
     // Force the std-widgets theme to dark: in a DAW the plugin view is a
@@ -156,6 +236,8 @@ export component PreVocalUI inherits Window {
     in-out property <float> drive: 0.0;
     in-out property <float> hpf: 20.0;
     in-out property <float> lpf: 20000.0;
+    max-height: 720px;
+    max-width: 900px;
     in-out property <float> air: 0.0;
     in-out property <float> comp-thresh: -18.0;
     in-out property <float> comp-ratio: 3.0;
@@ -167,6 +249,10 @@ export component PreVocalUI inherits Window {
     in-out property <float> delay-feedback: 30.0;
     in-out property <float> delay-mix: 15.0;
     in-out property <bool> delay-bypass: false;
+    in-out property <float> reverb-size: 0.5;
+    in-out property <float> reverb-damping: 0.5;
+    in-out property <float> reverb-mix: 15.0;
+    in-out property <bool> reverb-bypass: true;
     in-out property <float> output-trim: 0.0;
     in-out property <float> input-level: 0.0;
     in-out property <float> output-level: 0.0;
@@ -199,6 +285,10 @@ export component PreVocalUI inherits Window {
     callback delay-feedback-changed(float);
     callback delay-mix-changed(float);
     callback delay-bypass-toggled(bool);
+    callback reverb-size-changed(float);
+    callback reverb-damping-changed(float);
+    callback reverb-mix-changed(float);
+    callback reverb-bypass-toggled(bool);
     callback output-trim-changed(float);
     callback driver-selected(string);
     callback input-selected(string);
@@ -613,330 +703,318 @@ export component PreVocalUI inherits Window {
                     }
                 }
 
-                // Preamp section: drive, filters, air and output trim
-                VerticalLayout {
-                    spacing: 8px;
-                    horizontal-stretch: 1;
-                    vertical-stretch: 1;
-
-                    Rectangle {
-                        background: #2f4f4f8f;
-                        border-radius: 6px;
-                        drop-shadow-blur: 0px;
-                        drop-shadow-color: #2f4f4f8f;
-                        drop-shadow-offset-x: 0px;
-                        drop-shadow-offset-y: 0px;
-                        drop-shadow-spread: 0px; 
-                    Text {
-                        text: "PREAMP";
-                        font-size: 11px;
-                        color: #A0A0B0;
-                        font-family: "poppins";
-                        horizontal-alignment: TextHorizontalAlignment.center;
-                        letter-spacing: 3px;
-                    }
-                }
-
+                // Sections side by side: Preamp | Compressor | Delay | Reverb
                 HorizontalLayout {
-                    spacing: 20px;
+                    spacing: 16px;
                     alignment: LayoutAlignment.center;
+                    cross-axis-alignment: CrossAxisAlignment.stretch;
                     horizontal-stretch: 1;
                     vertical-stretch: 1;
 
-                VerticalLayout {
-                    spacing: 16px;
-                    alignment: center;
-                    cross-axis-alignment: CrossAxisAlignment.center;
-                    horizontal-stretch: 1;
-
-                    Text { text: "DRIVE"; font-size: 13px; color: #A0A0B0; }
-                    VerticalFader {
-                        minimum: 0.;
-                        height: 100px;
-                        maximum: 24.0;
-                        value <=> root.drive;
-                        changed(v) => { root.drive-changed(v); }
-                    }
-                    Text { text: root.drive.round() + " dB"; font-size: 14px; color: #C77DFF; }
-                }
-
-                VerticalLayout {
-                    spacing: 16px;
-                    alignment: center;
-                    cross-axis-alignment: CrossAxisAlignment.center;
-                    horizontal-stretch: 1;
-
-                    Text { text: "HPF"; font-size: 13px; color: #A0A0B0; }
-                    ControlKnob {
-                        minimum: 20.0;
-                        maximum: 200.0;
-                        default-value: 20.0;
-                        value <=> root.hpf;
-                        changed(v) => { root.hpf-changed(v); }
-                    }
-                    Text { text: root.freqLabel(root.hpf); font-size: 14px; color: #C77DFF; }
-                }
-
-                VerticalLayout {
-                    spacing: 16px;
-                    alignment: center;
-                    cross-axis-alignment: CrossAxisAlignment.center;
-                    horizontal-stretch: 1;
-
-                    Text { text: "LPF"; font-size: 13px; color: #A0A0B0; }
-                    ControlKnob {
-                        minimum: 500.0;
-                        maximum: 20000.0;
-                        default-value: 20000.0;
-                        value <=> root.lpf;
-                        changed(v) => { root.lpf-changed(v); }
-                    }
-                    Text { text: root.freqLabel(root.lpf); font-size: 14px; color: #C77DFF; }
-                }
-
-                VerticalLayout {
-                    spacing: 16px;
-                    alignment: center;
-                    cross-axis-alignment: CrossAxisAlignment.center;
-                    horizontal-stretch: 1;
-
-                    Text { text: "AIR"; font-size: 13px; color: #A0A0B0; }
-                    ControlKnob {
-                        minimum: 0.0;
-                        maximum: 6.0;
-                        default-value: 0.0;
-                        value <=> root.air;
-                        changed(v) => { root.air-changed(v); }
-                    }
-                    Text { text: root.formatDb(root.air); font-size: 14px; color: #C77DFF; }
-                }
-
-                VerticalLayout {
-                    spacing: 16px;
-                    alignment: center;
-                    cross-axis-alignment: CrossAxisAlignment.center;
-                    horizontal-stretch: 1;
-
-                    Text { text: "TRIM"; font-size: 13px; color: #A0A0B0; }
-                    VerticalFader {
-                        minimum: -12.0;
-                        height: 100px;
-                        maximum: 12.0;
-                        value <=> root.output-trim;
-                        changed(v) => { root.output-trim-changed(v); }
-                    }
-                    Text { text: root.output-trim + " dB"; font-size: 14px; color: #C77DFF; }
-                }
-                }
-                }
-
-                // Compressor section
-                
-                VerticalLayout {
-                    spacing: 12px;
-                    alignment: center;
-
+                    // Preamp section
                     Rectangle {
-                        background: #2f4f4f8f;
-                        border-radius: 6px;
-                        drop-shadow-blur: 0px;
-                        drop-shadow-color: #2f4f4f8f;
-                        drop-shadow-offset-y: 0px; 
-                        HorizontalLayout {
-                            width: parent.width;
-                            spacing: 10px;
-                            alignment: LayoutAlignment.center;
-                            cross-axis-alignment: CrossAxisAlignment.center;
-                            Text {
-                                text: "COMPRESSOR";
-                                font-size: 11px;
-                                color: #A0A0B0;
-                                font-family: "poppins";
-                                horizontal-alignment: TextHorizontalAlignment.center;
-                                letter-spacing: 3px;
+                        border-radius: 14px;
+                        background: #16161C;
+                        border-width: 1px;
+                        border-color: rgba(157, 78, 221, 0.14);
+                        horizontal-stretch: 1;
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            padding: 14px;
+                            spacing: 12px;
+                            alignment: LayoutAlignment.start;
+                            cross-axis-alignment: CrossAxisAlignment.stretch;
+
+                            SectionHeader {
+                                label: "PREAMP";
+                                show-toggle: false;
                             }
-                            SectionToggle {
+
+                            VerticalLayout {
+                                spacing: 12px;
+                                alignment: LayoutAlignment.center;
+                                cross-axis-alignment: CrossAxisAlignment.center;
+                                horizontal-stretch: 1;
+
+                                HorizontalLayout {
+                                    spacing: 14px;
+                                    alignment: LayoutAlignment.center;
+                                    cross-axis-alignment: CrossAxisAlignment.center;
+
+                                    FaderCol {
+                                        label: "DRIVE";
+                                        minimum: 0.0;
+                                        maximum: 24.0;
+                                        value <=> root.drive;
+                                        display: root.drive.round() + " dB";
+                                        changed(v) => { root.drive-changed(v); }
+                                    }
+                                    KnobCol {
+                                        label: "HPF";
+                                        minimum: 20.0;
+                                        maximum: 200.0;
+                                        default-value: 20.0;
+                                        value <=> root.hpf;
+                                        display: root.freqLabel(root.hpf);
+                                        changed(v) => { root.hpf-changed(v); }
+                                    }
+                                    KnobCol {
+                                        label: "LPF";
+                                        minimum: 500.0;
+                                        maximum: 20000.0;
+                                        default-value: 20000.0;
+                                        value <=> root.lpf;
+                                        display: root.freqLabel(root.lpf);
+                                        changed(v) => { root.lpf-changed(v); }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 14px;
+                                    alignment: LayoutAlignment.center;
+                                    cross-axis-alignment: CrossAxisAlignment.center;
+
+                                    KnobCol {
+                                        label: "AIR";
+                                        minimum: 0.0;
+                                        maximum: 6.0;
+                                        default-value: 0.0;
+                                        value <=> root.air;
+                                        display: root.formatDb(root.air);
+                                        changed(v) => { root.air-changed(v); }
+                                    }
+                                    FaderCol {
+                                        label: "TRIM";
+                                        minimum: -12.0;
+                                        maximum: 12.0;
+                                        value <=> root.output-trim;
+                                        display: root.output-trim + " dB";
+                                        changed(v) => { root.output-trim-changed(v); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Compressor section
+                    Rectangle {
+                        border-radius: 14px;
+                        background: #16161C;
+                        border-width: 1px;
+                        border-color: rgba(157, 78, 221, 0.14);
+                        horizontal-stretch: 1;
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            padding: 14px;
+                            spacing: 12px;
+                            alignment: LayoutAlignment.start;
+                            cross-axis-alignment: CrossAxisAlignment.stretch;
+
+                            SectionHeader {
+                                label: "COMPRESSOR";
                                 on: !root.comp-bypass;
                                 toggled(v) => {
                                     root.comp-bypass = !v;
                                     root.comp-bypass-toggled(!v);
                                 }
                             }
+
+                            VerticalLayout {
+                                spacing: 12px;
+                                alignment: LayoutAlignment.center;
+                                cross-axis-alignment: CrossAxisAlignment.center;
+                                horizontal-stretch: 1;
+
+                                HorizontalLayout {
+                                    spacing: 14px;
+                                    alignment: LayoutAlignment.center;
+                                    cross-axis-alignment: CrossAxisAlignment.center;
+
+                                    KnobCol {
+                                        label: "THRESH";
+                                        minimum: -60.0;
+                                        maximum: 0.0;
+                                        default-value: -18.0;
+                                        value <=> root.comp-thresh;
+                                        display: root.formatDb(root.comp-thresh);
+                                        changed(v) => { root.comp-thresh-changed(v); }
+                                    }
+                                    KnobCol {
+                                        label: "RATIO";
+                                        minimum: 1.0;
+                                        maximum: 20.0;
+                                        default-value: 3.0;
+                                        value <=> root.comp-ratio;
+                                        display: root.ratioLabel(root.comp-ratio);
+                                        changed(v) => { root.comp-ratio-changed(v); }
+                                    }
+                                    KnobCol {
+                                        label: "ATTACK";
+                                        minimum: 0.1;
+                                        maximum: 100.0;
+                                        default-value: 5.0;
+                                        value <=> root.comp-attack;
+                                        display: root.formatMs(root.comp-attack);
+                                        changed(v) => { root.comp-attack-changed(v); }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 14px;
+                                    alignment: LayoutAlignment.center;
+                                    cross-axis-alignment: CrossAxisAlignment.center;
+
+                                    KnobCol {
+                                        label: "RELEASE";
+                                        minimum: 10.0;
+                                        maximum: 1000.0;
+                                        default-value: 100.0;
+                                        value <=> root.comp-release;
+                                        display: root.formatMs(root.comp-release);
+                                        changed(v) => { root.comp-release-changed(v); }
+                                    }
+                                    KnobCol {
+                                        label: "MAKEUP";
+                                        minimum: 0.0;
+                                        maximum: 24.0;
+                                        default-value: 0.0;
+                                        value <=> root.comp-makeup;
+                                        display: root.formatDb(root.comp-makeup);
+                                        changed(v) => { root.comp-makeup-changed(v); }
+                                    }
+                                }
+                            }
                         }
                     }
 
-                    HorizontalLayout {
-                        spacing: 30px;
-                        alignment: LayoutAlignment.center;
-
-                        VerticalLayout {
-                            spacing: 10px;
-                            alignment: center;
-                            cross-axis-alignment: CrossAxisAlignment.center;
-
-                            Text { text: "THRESH"; font-size: 12px; color: #A0A0B0; }
-                            ControlKnob {
-                                minimum: -60.0;
-                                maximum: 0.0;
-                                default-value: -18.0;
-                                value <=> root.comp-thresh;
-                                changed(v) => { root.comp-thresh-changed(v); }
-                            }
-                            Text { text: root.formatDb(root.comp-thresh); font-size: 13px; color: #C77DFF; }
-                        }
-
-                        VerticalLayout {
-                            spacing: 10px;
-                            alignment: center;
-                            cross-axis-alignment: CrossAxisAlignment.center;
-
-                            Text { text: "RATIO"; font-size: 12px; color: #A0A0B0; }
-                            ControlKnob {
-                                minimum: 1.0;
-                                maximum: 20.0;
-                                default-value: 3.0;
-                                value <=> root.comp-ratio;
-                                changed(v) => { root.comp-ratio-changed(v); }
-                            }
-                            Text { text: root.ratioLabel(root.comp-ratio); font-size: 13px; color: #C77DFF; }
-                        }
-
-                        VerticalLayout {
-                            spacing: 10px;
-                            alignment: center;
-                            cross-axis-alignment: CrossAxisAlignment.center;
-
-                            Text { text: "ATTACK"; font-size: 12px; color: #A0A0B0; }
-                            ControlKnob {
-                                minimum: 0.1;
-                                maximum: 100.0;
-                                default-value: 5.0;
-                                value <=> root.comp-attack;
-                                changed(v) => { root.comp-attack-changed(v); }
-                            }
-                            Text { text: root.formatMs(root.comp-attack); font-size: 13px; color: #C77DFF; }
-                        }
-
-                        VerticalLayout {
-                            spacing: 10px;
-                            alignment: center;
-                            cross-axis-alignment: CrossAxisAlignment.center;
-
-                            Text { text: "RELEASE"; font-size: 12px; color: #A0A0B0; }
-                            ControlKnob {
-                                minimum: 10.0;
-                                maximum: 1000.0;
-                                default-value: 100.0;
-                                value <=> root.comp-release;
-                                changed(v) => { root.comp-release-changed(v); }
-                            }
-                            Text { text: root.formatMs(root.comp-release); font-size: 13px; color: #C77DFF; }
-                        }
-
-                        VerticalLayout {
-                            spacing: 10px;
-                            alignment: center;
-                            cross-axis-alignment: CrossAxisAlignment.center;
-
-                            Text { text: "MAKEUP"; font-size: 12px; color: #A0A0B0; }
-                            ControlKnob {
-                                minimum: 0.0;
-                                maximum: 24.0;
-                                default-value: 0.0;
-                                value <=> root.comp-makeup;
-                                changed(v) => { root.comp-makeup-changed(v); }
-                            }
-                            Text { text: root.formatDb(root.comp-makeup); font-size: 13px; color: #C77DFF; }
-                        }
-                    }
-                }
-
-                // Stereo delay section
-                VerticalLayout {
-                    spacing: 12px;
-                    alignment: center;
-
+                    // Stereo delay section
                     Rectangle {
-                        background: #2f4f4f8f;
-                        border-radius: 6px;
-                        drop-shadow-blur: 0px;
-                        drop-shadow-color: #2f4f4f8f;
-                        drop-shadow-offset-y: 0px; 
-                        HorizontalLayout {
-                            width: parent.width;
-                            spacing: 10px;
-                            alignment: LayoutAlignment.center;
-                            cross-axis-alignment: CrossAxisAlignment.center;
-                            Text {
-                                text: "DELAY";
-                                font-size: 11px;
-                                color: #A0A0B0;
-                                font-family: "poppins";
-                                horizontal-alignment: TextHorizontalAlignment.center;
-                                letter-spacing: 3px;
-                            }
-                            SectionToggle {
+                        border-radius: 14px;
+                        background: #16161C;
+                        border-width: 1px;
+                        border-color: rgba(157, 78, 221, 0.14);
+                        horizontal-stretch: 1;
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            padding: 14px;
+                            spacing: 12px;
+                            alignment: LayoutAlignment.start;
+                            cross-axis-alignment: CrossAxisAlignment.stretch;
+
+                            SectionHeader {
+                                label: "DELAY";
                                 on: !root.delay-bypass;
                                 toggled(v) => {
                                     root.delay-bypass = !v;
                                     root.delay-bypass-toggled(!v);
                                 }
                             }
+
+                            VerticalLayout {
+                                spacing: 12px;
+                                alignment: LayoutAlignment.center;
+                                cross-axis-alignment: CrossAxisAlignment.center;
+                                horizontal-stretch: 1;
+
+                                HorizontalLayout {
+                                    spacing: 14px;
+                                    alignment: LayoutAlignment.center;
+                                    cross-axis-alignment: CrossAxisAlignment.center;
+
+                                    KnobCol {
+                                        label: "TIME";
+                                        minimum: 1.0;
+                                        maximum: 1000.0;
+                                        default-value: 300.0;
+                                        value <=> root.delay-time;
+                                        display: root.formatMs(root.delay-time);
+                                        changed(v) => { root.delay-time-changed(v); }
+                                    }
+                                    KnobCol {
+                                        label: "FEEDBACK";
+                                        minimum: 0.0;
+                                        maximum: 90.0;
+                                        default-value: 30.0;
+                                        value <=> root.delay-feedback;
+                                        display: round(root.delay-feedback) + " %";
+                                        changed(v) => { root.delay-feedback-changed(v); }
+                                    }
+                                    KnobCol {
+                                        label: "MIX";
+                                        minimum: 0.0;
+                                        maximum: 100.0;
+                                        default-value: 15.0;
+                                        value <=> root.delay-mix;
+                                        display: round(root.delay-mix) + " %";
+                                        changed(v) => { root.delay-mix-changed(v); }
+                                    }
+                                }
+                            }
                         }
                     }
 
-                    HorizontalLayout {
-                        spacing: 30px;
-                        alignment: LayoutAlignment.center;
-
+                    // Reverb section (after the delay in the chain: the echo taps
+                    // fall naturally into the reverb tail).
+                    Rectangle {
+                        border-radius: 14px;
+                        background: #16161C;
+                        border-width: 1px;
+                        border-color: rgba(157, 78, 221, 0.14);
+                        horizontal-stretch: 1;
+                        vertical-stretch: 1;
                         VerticalLayout {
-                            spacing: 10px;
-                            alignment: center;
-                            cross-axis-alignment: CrossAxisAlignment.center;
+                            padding: 14px;
+                            spacing: 12px;
+                            alignment: LayoutAlignment.start;
+                            cross-axis-alignment: CrossAxisAlignment.stretch;
 
-                            Text { text: "TIME"; font-size: 12px; color: #A0A0B0;
-                                font-family: ""; }
-                            ControlKnob {
-                                minimum: 1.0;
-                                maximum: 1000.0;
-                                default-value: 300.0;
-                                value <=> root.delay-time;
-                                changed(v) => { root.delay-time-changed(v); }
+                            SectionHeader {
+                                label: "REVERB";
+                                on: !root.reverb-bypass;
+                                toggled(v) => {
+                                    root.reverb-bypass = !v;
+                                    root.reverb-bypass-toggled(!v);
+                                }
                             }
-                            Text { text: root.formatMs(root.delay-time); font-size: 13px; color: #C77DFF; }
-                        }
 
-                        VerticalLayout {
-                            spacing: 10px;
-                            alignment: center;
-                            cross-axis-alignment: CrossAxisAlignment.center;
+                            VerticalLayout {
+                                spacing: 12px;
+                                alignment: LayoutAlignment.center;
+                                cross-axis-alignment: CrossAxisAlignment.center;
+                                horizontal-stretch: 1;
 
-                            Text { text: "FEEDBACK"; font-size: 12px; color: #A0A0B0;
-                                font-family: ""; }
-                            ControlKnob {
-                                minimum: 0.0;
-                                maximum: 90.0;
-                                default-value: 30.0;
-                                value <=> root.delay-feedback;
-                                changed(v) => { root.delay-feedback-changed(v); }
+                                HorizontalLayout {
+                                    spacing: 14px;
+                                    alignment: LayoutAlignment.center;
+                                    cross-axis-alignment: CrossAxisAlignment.center;
+
+                                    KnobCol {
+                                        label: "SIZE";
+                                        minimum: 0.0;
+                                        maximum: 1.0;
+                                        default-value: 0.5;
+                                        value <=> root.reverb-size;
+                                        display: round(root.reverb-size * 100) + " %";
+                                        changed(v) => { root.reverb-size-changed(v); }
+                                    }
+                                    KnobCol {
+                                        label: "DAMPING";
+                                        minimum: 0.0;
+                                        maximum: 1.0;
+                                        default-value: 0.5;
+                                        value <=> root.reverb-damping;
+                                        display: round(root.reverb-damping * 100) + " %";
+                                        changed(v) => { root.reverb-damping-changed(v); }
+                                    }
+                                    KnobCol {
+                                        label: "MIX";
+                                        minimum: 0.0;
+                                        maximum: 100.0;
+                                        default-value: 15.0;
+                                        value <=> root.reverb-mix;
+                                        display: round(root.reverb-mix) + " %";
+                                        changed(v) => { root.reverb-mix-changed(v); }
+                                    }
+                                }
                             }
-                            Text { text: round(root.delay-feedback) + " %"; font-size: 13px; color: #C77DFF; }
-                        }
-
-                        VerticalLayout {
-                            spacing: 10px;
-                            alignment: center;
-                            cross-axis-alignment: CrossAxisAlignment.center;
-
-                            Text { text: "MIX"; font-size: 12px; color: #A0A0B0; }
-                            ControlKnob {
-                                minimum: 0.0;
-                                maximum: 100.0;
-                                default-value: 15.0;
-                                value <=> root.delay-mix;
-                                changed(v) => { root.delay-mix-changed(v); }
-                            }
-                            Text { text: round(root.delay-mix) + " %"; font-size: 13px; color: #C77DFF; }
                         }
                     }
                 }
