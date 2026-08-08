@@ -351,6 +351,8 @@ fn apply_param_values(ui: &PreVocalUI, params: &PreVocalParams) {
     ui.set_hpf(params.hpf.modulated_plain_value());
     ui.set_lpf(params.lpf.modulated_plain_value());
     ui.set_air(params.air.modulated_plain_value());
+    ui.set_tube_character(params.tube_character.modulated_plain_value());
+    ui.set_tube_sag(params.tube_sag.modulated_plain_value());
     ui.set_comp_thresh(params.comp_thresh.modulated_plain_value());
     ui.set_comp_ratio(params.comp_ratio.modulated_plain_value());
     ui.set_comp_attack(params.comp_attack.modulated_plain_value());
@@ -392,6 +394,8 @@ struct ParamFingerprint {
     hpf: f32,
     lpf: f32,
     air: f32,
+    tube_character: f32,
+    tube_sag: f32,
     comp_thresh: f32,
     comp_ratio: f32,
     comp_attack: f32,
@@ -416,6 +420,8 @@ impl ParamFingerprint {
             hpf: params.hpf.modulated_plain_value(),
             lpf: params.lpf.modulated_plain_value(),
             air: params.air.modulated_plain_value(),
+            tube_character: params.tube_character.modulated_plain_value(),
+            tube_sag: params.tube_sag.modulated_plain_value(),
             comp_thresh: params.comp_thresh.modulated_plain_value(),
             comp_ratio: params.comp_ratio.modulated_plain_value(),
             comp_attack: params.comp_attack.modulated_plain_value(),
@@ -786,6 +792,14 @@ fn apply_preset(setter: &ParamSetter, params: &PreVocalParams, preset: &Preset) 
     setter.set_parameter(&params.air, preset.air_db);
     setter.end_set_parameter(&params.air);
 
+    setter.begin_set_parameter(&params.tube_character);
+    setter.set_parameter(&params.tube_character, preset.tube_character);
+    setter.end_set_parameter(&params.tube_character);
+
+    setter.begin_set_parameter(&params.tube_sag);
+    setter.set_parameter(&params.tube_sag, preset.tube_sag);
+    setter.end_set_parameter(&params.tube_sag);
+
     setter.begin_set_parameter(&params.comp_thresh);
     setter.set_parameter(&params.comp_thresh, preset.comp_thresh_db);
     setter.end_set_parameter(&params.comp_thresh);
@@ -1101,6 +1115,24 @@ fn create_editor_ui(
 
     let ctx = Arc::clone(context);
     let p = Arc::clone(params);
+    ui.on_tube_character_changed(move |v| {
+        let setter = ParamSetter::new(&*ctx);
+        setter.begin_set_parameter(&p.tube_character);
+        setter.set_parameter(&p.tube_character, v.clamp(0.0, 1.0));
+        setter.end_set_parameter(&p.tube_character);
+    });
+
+    let ctx = Arc::clone(context);
+    let p = Arc::clone(params);
+    ui.on_tube_sag_changed(move |v| {
+        let setter = ParamSetter::new(&*ctx);
+        setter.begin_set_parameter(&p.tube_sag);
+        setter.set_parameter(&p.tube_sag, v.clamp(0.0, 1.0));
+        setter.end_set_parameter(&p.tube_sag);
+    });
+
+    let ctx = Arc::clone(context);
+    let p = Arc::clone(params);
     ui.on_output_trim_changed(move |v| {
         let setter = ParamSetter::new(&*ctx);
         let gain = util::db_to_gain(v.clamp(-12.0, 12.0));
@@ -1403,6 +1435,8 @@ impl Editor for SlintEditor {
             "hpf" => ui.set_hpf(params.hpf.modulated_plain_value()),
             "lpf" => ui.set_lpf(params.lpf.modulated_plain_value()),
             "air" => ui.set_air(params.air.modulated_plain_value()),
+            "tube_character" => ui.set_tube_character(params.tube_character.modulated_plain_value()),
+            "tube_sag" => ui.set_tube_sag(params.tube_sag.modulated_plain_value()),
             "comp_thresh" => ui.set_comp_thresh(params.comp_thresh.modulated_plain_value()),
             "comp_ratio" => ui.set_comp_ratio(params.comp_ratio.modulated_plain_value()),
             "comp_attack" => ui.set_comp_attack(params.comp_attack.modulated_plain_value()),
@@ -1438,6 +1472,8 @@ impl Editor for SlintEditor {
             "hpf" => ui.set_hpf(params.hpf.modulated_plain_value()),
             "lpf" => ui.set_lpf(params.lpf.modulated_plain_value()),
             "air" => ui.set_air(params.air.modulated_plain_value()),
+            "tube_character" => ui.set_tube_character(params.tube_character.modulated_plain_value()),
+            "tube_sag" => ui.set_tube_sag(params.tube_sag.modulated_plain_value()),
             "comp_thresh" => ui.set_comp_thresh(params.comp_thresh.modulated_plain_value()),
             "comp_ratio" => ui.set_comp_ratio(params.comp_ratio.modulated_plain_value()),
             "comp_attack" => ui.set_comp_attack(params.comp_attack.modulated_plain_value()),

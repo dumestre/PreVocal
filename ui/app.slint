@@ -201,7 +201,7 @@ component SectionHeader inherits Rectangle {
     HorizontalLayout {
         width: parent.width;
         spacing: 10px;
-        alignment: LayoutAlignment.center;
+        alignment: LayoutAlignment.stretch;
         cross-axis-alignment: CrossAxisAlignment.center;
         Text {
             text: root.label;
@@ -239,6 +239,8 @@ export component PreVocalUI inherits Window {
     max-height: 720px;
     max-width: 900px;
     in-out property <float> air: 0.0;
+    in-out property <float> tube-character: 0.35;
+    in-out property <float> tube-sag: 0.0;
     in-out property <float> comp-thresh: -18.0;
     in-out property <float> comp-ratio: 3.0;
     in-out property <float> comp-attack: 5.0;
@@ -275,6 +277,8 @@ export component PreVocalUI inherits Window {
     callback hpf-changed(float);
     callback lpf-changed(float);
     callback air-changed(float);
+    callback tube-character-changed(float);
+    callback tube-sag-changed(float);
     callback comp-thresh-changed(float);
     callback comp-ratio-changed(float);
     callback comp-attack-changed(float);
@@ -638,10 +642,13 @@ export component PreVocalUI inherits Window {
                     // Previous preset
                     Rectangle {
                         width: 26px;
+                        drop-shadow-offset-y: 3px;
                         height: 24px;
                         border-radius: 12px;
                         background: ta_preset_prev.pressed ? #3C096C : #12121421;
                         border-width: 1px;
+                        drop-shadow-blur: 6px;
+                        drop-shadow-color: #0f0f1024;
                         Image {
                             width: 14px;
                             height: 14px;
@@ -677,6 +684,9 @@ export component PreVocalUI inherits Window {
                         width: 26px;
                         height: 24px;
                         border-radius: 12px;
+                        drop-shadow-blur: 6px;
+                        drop-shadow-color: #0f0f1024;
+                        drop-shadow-offset-y: 3px;
                         accessible-role: AccessibleRole.none;
                         background: ta_preset_prev.pressed ? #3C096C : #12121421;
                         border-width: 1px;
@@ -716,6 +726,7 @@ export component PreVocalUI inherits Window {
                         border-radius: 14px;
                         background: #16161C;
                         border-width: 1px;
+                        drop-shadow-blur: 6px;
                         border-color: rgba(157, 78, 221, 0.14);
                         horizontal-stretch: 1;
                         vertical-stretch: 1;
@@ -789,6 +800,30 @@ export component PreVocalUI inherits Window {
                                         value <=> root.output-trim;
                                         display: root.output-trim + " dB";
                                         changed(v) => { root.output-trim-changed(v); }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 14px;
+                                    alignment: LayoutAlignment.center;
+                                    cross-axis-alignment: CrossAxisAlignment.center;
+
+                                    KnobCol {
+                                        label: "CHARACTER";
+                                        minimum: 0.0;
+                                        maximum: 1.0;
+                                        default-value: 0.35;
+                                        value <=> root.tube-character;
+                                        display: (root.tube-character * 100.0).round() + " %";
+                                        changed(v) => { root.tube-character-changed(v); }
+                                    }
+                                    KnobCol {
+                                        label: "SAG";
+                                        minimum: 0.0;
+                                        maximum: 1.0;
+                                        default-value: 0.0;
+                                        value <=> root.tube-sag;
+                                        display: (root.tube-sag * 100.0).round() + " %";
+                                        changed(v) => { root.tube-sag-changed(v); }
                                     }
                                 }
                             }

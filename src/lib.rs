@@ -86,6 +86,12 @@ pub struct PreVocalParams {
     #[id = "air"]
     pub air: FloatParam,
 
+    #[id = "tube_character"]
+    pub tube_character: FloatParam,
+
+    #[id = "tube_sag"]
+    pub tube_sag: FloatParam,
+
     #[id = "comp_bypass"]
     pub comp_bypass: BoolParam,
 
@@ -193,6 +199,22 @@ impl Default for PreVocalParams {
             .with_smoother(SmoothingStyle::Linear(100.0))
             .with_unit(" dB")
             .with_value_to_string(formatters::v2s_f32_rounded(1)),
+
+            tube_character: FloatParam::new(
+                "Character",
+                0.35,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            tube_sag: FloatParam::new(
+                "Sag",
+                0.0,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
 
             comp_bypass: BoolParam::new("Compressor Bypass", false),
 
@@ -492,10 +514,66 @@ impl BiquadState {
     }
 }
 
-/// Per-channel filter state grouping the HPF, LPF, Air high-shelf biquads and
-/// the compressor envelope.
+/// One-pole lowpass filter state used inside the tube stage.
+#[derive(Clone, Copy, Default)]
+pub struct OnePoleLp {
+    y: f32,
+}
+
+impl OnePoleLp {
+    fn process(&mut self, input: f32, coeff: f32) -> f32 {
+        self.y += coeff * (input - self.y);
+        self.y
+    }
+}
+
+/// One-pole (DC-blocking) highpass filter state used at the tube input to
+/// remove the DC component introduced by the bias. Implemented as the
+/// difference `x - lp` so only the DC/low band is removed and the audio
+/// band passes with unity gain.
+#[derive(Clone, Copy, Default)]
+pub struct OnePoleHp {
+    lp: OnePoleLp,
+}
+
+impl OnePoleHp {
+    fn process(&mut self, input: f32, coeff: f32) -> f32 {
+        input - self.lp.process(input, coeff)
+    }
+}
+
+/// Per-channel tube/valve stage state: input coupling HPF, drive-dependent
+/// input LPF, output transformer LPF and the sag envelope follower.
+#[derive(Clone, Copy, Default)]
+pub struct TubeState {
+    pub coupling_hp: OnePoleHp,
+    pub input_lp: OnePoleLp,
+    pub transformer_lp: OnePoleLp,
+    pub envelope: f32,
+}
+
+/// Fixed per-block coefficients for the tube stage.
+#[derive(Clone, Copy)]
+pub struct TubeCoefs {
+    /// Asymmetry bias (even-harmonic "warmth"). 0 => symmetric tanh.
+    pub bias: f32,
+    /// Input one-pole LPF coefficient (darkens as drive increases).
+    pub input_lp_coeff: f32,
+    /// Input coupling one-pole HPF coefficient (~45 Hz).
+    pub coupling_hp_coeff: f32,
+    /// Output transformer one-pole LPF coefficient (~5 kHz).
+    pub transformer_lp_coeff: f32,
+    /// Sag strength: `g_eff = 1 / (1 + sag_k * envelope)`.
+    pub sag_k: f32,
+    /// One-pole release coefficient for the sag envelope (~80 ms).
+    pub sag_release_coeff: f32,
+}
+
+/// Per-channel filter state grouping the tube stage, the HPF, LPF, Air
+/// high-shelf biquads and the compressor envelope.
 #[derive(Clone, Copy, Default)]
 pub struct ChannelFilter {
+    pub tube: TubeState,
     pub hpf: BiquadState,
     pub lpf: BiquadState,
     pub air: BiquadState,
@@ -575,9 +653,57 @@ pub fn highshelf_2p_coeffs(freq: f32, db_gain: f32, sample_rate: f32) -> BiquadC
     }
 }
 
+/// Compute the fixed-per-block tube stage coefficients.
+pub fn tube_coefs(tube_character: f32, tube_sag: f32, drive: f32, sample_rate: f32) -> TubeCoefs {
+    // Input LPF corner drops from ~6 kHz (clean) to ~1.2 kHz (fully driven),
+    // emulating a preamp grid stage that darkens as it saturates.
+    let drive_db = (20.0 * drive.log10().max(0.0)).clamp(0.0, 24.0);
+    let drive_norm = drive_db / 24.0;
+    let input_lp_freq = 6000.0 * 0.2_f32.powf(drive_norm);
+    let one_pole_lp = |freq: f32| 1.0 - (-2.0 * std::f32::consts::PI * freq / sample_rate).exp();
+    TubeCoefs {
+        bias: 0.15 * tube_character,
+        input_lp_coeff: one_pole_lp(input_lp_freq),
+        coupling_hp_coeff: one_pole_lp(45.0),
+        transformer_lp_coeff: one_pole_lp(5000.0),
+        sag_k: tube_sag * 0.3,
+        sag_release_coeff: (-1.0 / (sample_rate * 0.08)).exp(),
+    }
+}
+
+/// Process one sample through the tube/valve stage:
+///
+/// `coupling HPF -> drive-dependent input LPF -> sag -> asymmetric tanh -> transformer LPF`
+///
+/// `input` is expected to be the already drive-scaled signal (`input * drive`).
+/// The asymmetric saturation (`tanh(g*(x+b)) - tanh(g*b)`) generates even
+/// harmonics (2nd = warmth). The `-tanh(g*b)` removes the DC of the bias and
+/// the normalization keeps the small-signal gain at 1 (so at `character=0`
+/// the stage is exactly the previous symmetric `tanh`).
+#[inline]
+pub fn tube_stage(input: f32, coefs: &TubeCoefs, state: &mut TubeState) -> f32 {
+    let x = state.coupling_hp.process(input, coefs.coupling_hp_coeff);
+    let x = state.input_lp.process(x, coefs.input_lp_coeff);
+
+    // Sag: peak detector with instant attack / ~80 ms release reduces the
+    // effective drive under load (power-amp "sag" feel).
+    let abs = x.abs();
+    state.envelope = if abs > state.envelope {
+        abs
+    } else {
+        state.envelope * coefs.sag_release_coeff + (1.0 - coefs.sag_release_coeff) * abs
+    };
+    let g = 1.0 / (1.0 + coefs.sag_k * state.envelope);
+
+    let gb = g * coefs.bias;
+    let y = (g * (x + coefs.bias)).tanh() - gb.tanh();
+    let y = y / (1.0 - gb * gb);
+    state.transformer_lp.process(y, coefs.transformer_lp_coeff)
+}
+
 /// Process a single sample through the complete PreVocal chain:
 ///
-/// `input -> Drive (tanh) -> HPF -> LPF -> Air (high-shelf) -> Compressor -> Output Trim`
+/// `input -> Drive -> Tube stage -> HPF -> LPF -> Air (high-shelf) -> Compressor -> Output Trim`
 ///
 /// When `comp_bypass` is set the compressor's envelope keeps tracking the
 /// signal (so re-enabling it doesn't pump), but no gain is applied.
@@ -586,6 +712,8 @@ pub fn process_sample(
     input: f32,
     drive: f32,
     trim: f32,
+    tube: &TubeCoefs,
+    tube_state: &mut TubeState,
     hpf: &BiquadCoeffs,
     hpf_state: &mut BiquadState,
     lpf: &BiquadCoeffs,
@@ -596,8 +724,7 @@ pub fn process_sample(
     comp_state: &mut CompressorState,
     comp_bypass: bool,
 ) -> f32 {
-    let mut x = input * drive;
-    x = x.tanh();
+    let x = tube_stage(input * drive, tube, tube_state);
     let y = hpf_state.process(x, hpf);
     let w = lpf_state.process(y, lpf);
     let z = air_state.process(w, air);
@@ -629,6 +756,8 @@ struct BlockParams {
     hpf_freq: f32,
     lpf_freq: f32,
     air_db: f32,
+    tube_character: f32,
+    tube_sag: f32,
     comp_thresh_db: f32,
     comp_ratio: f32,
     comp_attack_ms: f32,
@@ -695,6 +824,8 @@ impl PreVocalDsp {
             hpf_freq: self.params.hpf.smoothed.next_step(steps),
             lpf_freq: self.params.lpf.smoothed.next_step(steps),
             air_db: self.params.air.smoothed.next_step(steps),
+            tube_character: self.params.tube_character.smoothed.next_step(steps),
+            tube_sag: self.params.tube_sag.smoothed.next_step(steps),
             comp_thresh_db: self.params.comp_thresh.smoothed.next_step(steps),
             comp_ratio: self.params.comp_ratio.smoothed.next_step(steps),
             comp_attack_ms: self.params.comp_attack.smoothed.next_step(steps),
@@ -732,6 +863,10 @@ impl PreVocalDsp {
         )
     }
 
+    fn tube_coefs(&self, p: &BlockParams) -> TubeCoefs {
+        tube_coefs(p.tube_character, p.tube_sag, p.drive, self.sample_rate)
+    }
+
     fn delay_coefs(&self, p: &BlockParams) -> DelayCoefs {
         DelayCoefs::new(
             p.delay_time_ms,
@@ -754,6 +889,7 @@ impl PreVocalDsp {
         };
         let (hpf_coeffs, lpf_coeffs, air_coeffs) = self.coeffs_for(&p);
         let comp_coefs = self.comp_coefs(&p);
+        let tube_coefs = self.tube_coefs(&p);
         let delay_coefs = self.delay_coefs(&p);
         let reverb_coefs = self.reverb_coefs(&p);
         let stereo = channels.len() > 1;
@@ -777,6 +913,7 @@ impl PreVocalDsp {
         };
 
         for (channel, samples) in channels.iter_mut().enumerate() {
+            let mut tube = self.filter_states[channel].tube;
             let mut hpf = self.filter_states[channel].hpf;
             let mut lpf = self.filter_states[channel].lpf;
             let mut air = self.filter_states[channel].air;
@@ -786,6 +923,8 @@ impl PreVocalDsp {
                     *sample,
                     p.drive,
                     p.trim,
+                    &tube_coefs,
+                    &mut tube,
                     &hpf_coeffs,
                     &mut hpf,
                     &lpf_coeffs,
@@ -797,7 +936,7 @@ impl PreVocalDsp {
                     p.comp_bypass,
                 );
             }
-            self.filter_states[channel] = ChannelFilter { hpf, lpf, air, comp };
+            self.filter_states[channel] = ChannelFilter { tube, hpf, lpf, air, comp };
         }
 
         // Stereo delay at the end of the chain: the principal signal stays mono,
@@ -829,7 +968,7 @@ impl PreVocalDsp {
                 }
             }
         }
-
+    
         // OUT meter: RMS + peak of the fully processed signal.
         let mut out_sum_sq = 0.0f32;
         let mut out_peak = 0.0f32;
@@ -865,6 +1004,7 @@ impl PreVocalDsp {
         };
         let (hpf_coeffs, lpf_coeffs, air_coeffs) = self.coeffs_for(&p);
         let comp_coefs = self.comp_coefs(&p);
+        let tube_coefs = self.tube_coefs(&p);
         let delay_coefs = self.delay_coefs(&p);
         let reverb_coefs = self.reverb_coefs(&p);
         let stereo = num_channels > 1;
@@ -872,6 +1012,7 @@ impl PreVocalDsp {
         for frame in 0..num_frames {
             for channel in 0..num_channels {
                 let idx = frame * num_channels + channel;
+                let mut tube = self.filter_states[channel].tube;
                 let mut hpf = self.filter_states[channel].hpf;
                 let mut lpf = self.filter_states[channel].lpf;
                 let mut air = self.filter_states[channel].air;
@@ -880,6 +1021,8 @@ impl PreVocalDsp {
                     samples[idx],
                     p.drive,
                     p.trim,
+                    &tube_coefs,
+                    &mut tube,
                     &hpf_coeffs,
                     &mut hpf,
                     &lpf_coeffs,
@@ -890,7 +1033,7 @@ impl PreVocalDsp {
                     &mut comp,
                     p.comp_bypass,
                 );
-                self.filter_states[channel] = ChannelFilter { hpf, lpf, air, comp };
+                self.filter_states[channel] = ChannelFilter { tube, hpf, lpf, air, comp };
             }
             // Stereo delay at the end of the chain (mono principal, stereo taps).
             if !p.delay_bypass {
@@ -920,3 +1063,74 @@ impl PreVocalDsp {
 
 nice_export_clap!(PreVocal);
 nice_export_vst3!(PreVocal);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The tube stage must produce even harmonics (2nd = warmth) when
+    /// `character > 0` and none when `character = 0`. Measured with a
+    /// phase-independent (complex) 2nd-harmonic correlation after the
+    /// filters settle.
+    #[test]
+    fn tube_curve_asymmetry() {
+        let sr = 48_000.0;
+        let drive = util::db_to_gain(12.0);
+        let warm = tube_coefs(1.0, 0.0, drive, sr);
+        let neutral = tube_coefs(0.0, 0.0, drive, sr);
+
+        let h2_mag = |coefs: &TubeCoefs| -> f32 {
+            let omega = 2.0 * std::f32::consts::PI * 1000.0 / sr;
+            let n = 8000;
+            let mut s = TubeState::default();
+            for i in 0..6000 {
+                let x = (omega * i as f32).sin() * 0.5;
+                let _ = tube_stage(x, coefs, &mut s);
+            }
+            let mut re = 0.0f32;
+            let mut im = 0.0f32;
+            for i in 6000..n {
+                let t = i as f32;
+                let x = (omega * t).sin() * 0.5;
+                let y = tube_stage(x, coefs, &mut s);
+                let p = 2.0 * omega * t;
+                re += y * p.cos();
+                im += y * p.sin();
+            }
+            let m = (n - 6000) as f32;
+            let re = 2.0 * re / m;
+            let im = 2.0 * im / m;
+            (re * re + im * im).sqrt()
+        };
+
+        assert!(h2_mag(&neutral) < 0.005, "neutral h2={}", h2_mag(&neutral));
+        assert!(h2_mag(&warm) > 0.005, "warm h2={}", h2_mag(&warm));
+    }
+
+    /// The warmth bias must not change the overall level: the small-signal
+    /// gain of the stage stays ~1 for any `character` value.
+    #[test]
+    fn tube_character_keeps_level() {
+        let sr = 48_000.0;
+        let drive = 1.0f32;
+        let n = 4800;
+        let omega = 2.0 * std::f32::consts::PI * 1000.0 / sr;
+        let rms = |character: f32| {
+            let coefs = tube_coefs(character, 0.0, drive, sr);
+            let mut s = TubeState::default();
+            let mut acc = 0.0f32;
+            for i in 0..n {
+                let x = (omega * i as f32).sin() * 0.01;
+                let y = tube_stage(x, &coefs, &mut s);
+                acc += y * y;
+            }
+            (acc / n as f32).sqrt()
+        };
+        let neutral = rms(0.0);
+        let warm = rms(1.0);
+        assert!(
+            (warm / neutral - 1.0).abs() < 0.05,
+            "neutral={neutral} warm={warm}"
+        );
+    }
+}

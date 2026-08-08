@@ -1,4 +1,4 @@
-# PreVocal — Developer Notes
+Yeah, view quanto dulce to pegaramazing successdrawrate, tabosi tante outrava perdigua tava quinze bo# PreVocal — Developer Notes
 
 ## Build bundles (VST3 + CLAP)
 

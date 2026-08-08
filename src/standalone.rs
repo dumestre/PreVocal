@@ -73,6 +73,12 @@ impl UiBridge {
                 .air
                 ._internal_update_smoother(sample_rate, false);
             self.params
+                .tube_character
+                ._internal_update_smoother(sample_rate, false);
+            self.params
+                .tube_sag
+                ._internal_update_smoother(sample_rate, false);
+            self.params
                 .comp_thresh
                 ._internal_update_smoother(sample_rate, false);
             self.params
@@ -153,6 +159,28 @@ impl UiBridge {
         }
         unsafe {
             self.params.air._internal_set_plain_value(db);
+        }
+        self.update_smoothers();
+    }
+
+    fn write_tube_character(&self, v: f32) {
+        let v = v.clamp(0.0, 1.0);
+        if !v.is_finite() {
+            return;
+        }
+        unsafe {
+            self.params.tube_character._internal_set_plain_value(v);
+        }
+        self.update_smoothers();
+    }
+
+    fn write_tube_sag(&self, v: f32) {
+        let v = v.clamp(0.0, 1.0);
+        if !v.is_finite() {
+            return;
+        }
+        unsafe {
+            self.params.tube_sag._internal_set_plain_value(v);
         }
         self.update_smoothers();
     }
@@ -299,6 +327,8 @@ impl UiBridge {
         self.write_hpf(preset.hpf_hz);
         self.write_lpf(preset.lpf_hz);
         self.write_air(preset.air_db);
+        self.write_tube_character(preset.tube_character);
+        self.write_tube_sag(preset.tube_sag);
         self.write_comp_thresh(preset.comp_thresh_db);
         self.write_comp_ratio(preset.comp_ratio);
         self.write_comp_attack(preset.comp_attack_ms);
@@ -342,6 +372,14 @@ impl UiBridge {
 
     fn air_value(&self) -> f32 {
         self.params.air.modulated_plain_value()
+    }
+
+    fn tube_character_value(&self) -> f32 {
+        self.params.tube_character.modulated_plain_value()
+    }
+
+    fn tube_sag_value(&self) -> f32 {
+        self.params.tube_sag.modulated_plain_value()
     }
 
     fn comp_thresh_value(&self) -> f32 {
@@ -1296,6 +1334,8 @@ fn run_gui(
     ui.set_hpf(bridge.hpf_value());
     ui.set_lpf(bridge.lpf_value());
     ui.set_air(bridge.air_value());
+    ui.set_tube_character(bridge.tube_character_value());
+    ui.set_tube_sag(bridge.tube_sag_value());
     ui.set_comp_thresh(bridge.comp_thresh_value());
     ui.set_comp_ratio(bridge.comp_ratio_value());
     ui.set_comp_attack(bridge.comp_attack_value());
@@ -1331,6 +1371,12 @@ fn run_gui(
 
     let bridge_air = Arc::clone(&bridge);
     ui.on_air_changed(move |v| bridge_air.write_air(v));
+
+    let bridge_tube_character = Arc::clone(&bridge);
+    ui.on_tube_character_changed(move |v| bridge_tube_character.write_tube_character(v));
+
+    let bridge_tube_sag = Arc::clone(&bridge);
+    ui.on_tube_sag_changed(move |v| bridge_tube_sag.write_tube_sag(v));
 
     let bridge_comp_thresh = Arc::clone(&bridge);
     ui.on_comp_thresh_changed(move |v| bridge_comp_thresh.write_comp_thresh(v));
@@ -1380,6 +1426,8 @@ fn run_gui(
             ui.set_hpf(bridge_preset.hpf_value());
             ui.set_lpf(bridge_preset.lpf_value());
             ui.set_air(bridge_preset.air_value());
+            ui.set_tube_character(bridge_preset.tube_character_value());
+            ui.set_tube_sag(bridge_preset.tube_sag_value());
             ui.set_comp_thresh(bridge_preset.comp_thresh_value());
             ui.set_comp_ratio(bridge_preset.comp_ratio_value());
             ui.set_comp_attack(bridge_preset.comp_attack_value());
