@@ -132,6 +132,13 @@ static EDITOR_JOIN: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None
 /// has already exited by then (it stops as soon as its UI is gone).
 static REFRESH_JOIN: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
 
+/// Shared liveness flag for the UI-refresh thread. `Weak::upgrade()` returns
+/// None from any thread other than the one that created the Weak, so the
+/// refresh thread cannot use it to detect a closed window — it polls this flag
+/// instead. The editor thread clears it (and drops the Arc) right after the
+/// editor window is destroyed; a new Arc is stored on every open.
+static REFRESH_ALIVE: Mutex<Option<Arc<std::sync::atomic::AtomicBool>>> = Mutex::new(None);
+
 /// Set by `SlintEditorInstance::drop` (host/GUI thread) to signal the editor
 /// thread that a close is in flight. Guards against a pending quit being
 /// processed by a *later* `run_event_loop()`: if this flag is still set when
@@ -430,27 +437,26 @@ impl ParamFingerprint {
 /// DSP writes RMS/peak into the shared [`MeterState`] on every audio block and
 /// this thread smooths + forwards them (same ballistics as the standalone).
 ///
-/// The thread exits on its own as soon as the editor window is gone (the weak
-/// handle stops upgrading).
+/// The thread exits on its own once the editor window is gone. `Weak::upgrade()`
+/// cannot be used as the liveness probe here (it returns None off-thread), so
+/// it polls `alive`, which the editor thread clears after the window is
+/// destroyed.
 fn spawn_ui_refresh_thread(
     weak: slint::Weak<PreVocalUI>,
     params: Arc<PreVocalParams>,
     meters: Arc<Mutex<MeterState>>,
+    alive: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let handle = std::thread::Builder::new()
         .name("prevocal-ui-refresh".into())
         .spawn(move || {
+            tracing::info!("ui refresh thread started (params + meters)");
             let mut last = ParamFingerprint::read(&params);
             let mut smooth_in = 0.0f32;
             let mut smooth_out = 0.0f32;
             let mut peak_in = 0.0f32;
             let mut peak_out = 0.0f32;
-            loop {
-                // Stop when the editor window is gone (upgrade fails once the
-                // UI handle is dropped after the event loop quits).
-                if weak.upgrade().is_none() {
-                    break;
-                }
+            while alive.load(std::sync::atomic::Ordering::Relaxed) {
 
                 // Push parameter changes (initial state, preset loads, host
                 // automation) as soon as they diverge from what the UI shows.
@@ -1047,8 +1053,11 @@ fn create_editor_ui(
     *lock_mutex(&active) = Some(ui.as_weak());
 
     // Keep the UI in sync with the realtime params and meters for the whole
-    // lifetime of this editor session (see `spawn_ui_refresh_thread`).
-    spawn_ui_refresh_thread(ui.as_weak(), Arc::clone(params), Arc::clone(meters));
+    // lifetime of this editor session (see `spawn_ui_refresh_thread`). The
+    // alive flag tells the refresh thread when this window is gone.
+    let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    *lock_mutex(&REFRESH_ALIVE) = Some(Arc::clone(&alive));
+    spawn_ui_refresh_thread(ui.as_weak(), Arc::clone(params), Arc::clone(meters), alive);
 
     Some(ui)
 }
@@ -1086,9 +1095,13 @@ pub fn shutdown_editor_thread() {
         tracing::info!("editor: editor thread joined, DLL unload safe");
     }
     // The UI-refresh thread also lives inside this DLL. By now the editor
-    // thread has dropped the UI, so the refresh thread's weak upgrade fails on
-    // its next tick (≤40 ms) and it exits on its own; joining guarantees it is
-    // gone before the module is unmapped.
+    // thread has dropped the UI, so the refresh thread's alive flag is clear and
+    // it exits on its next poll (≤40 ms); joining guarantees it is gone before
+    // the module is unmapped.
+    if let Some(alive) = lock_mutex(&REFRESH_ALIVE).as_ref() {
+        alive.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+    lock_mutex(&REFRESH_ALIVE).take();
     if let Some(handle) = lock_mutex(&REFRESH_JOIN).take() {
         tracing::info!("editor: joining UI refresh thread...");
         let _ = handle.join();
@@ -1169,6 +1182,12 @@ fn editor_thread_loop(rx: std::sync::mpsc::Receiver<EditorMsg>) {
 
                 *lock_mutex(&active) = None;
                 drop(ui);
+                // Tell the UI-refresh thread its window is gone; it exits on
+                // its next poll (≤40 ms) so `shutdown_editor_thread` can join it.
+                if let Some(alive) = lock_mutex(&REFRESH_ALIVE).as_ref() {
+                    alive.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+                lock_mutex(&REFRESH_ALIVE).take();
                 tracing::info!("editor: editor window destroyed");
                 tracing::info!("editor: thread parked, waiting for Open/Close message");
             }

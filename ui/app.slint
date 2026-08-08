@@ -108,12 +108,15 @@ component MeterWithScale inherits Rectangle {
     Text { x: 22px; y: root.labelY(1.0); text: "-60"; font-size: 8px; color: #707078; }
 }
 
-// Bypass switch for a DSP section (compressor / delay). The preamp has no// bypass: it is the heart of the plugin and always runs.
+// On/off switch for a DSP section (compressor / delay). `on` reflects the
+// section's ACTIVE state (purple "ON" = the effect is engaged, gray "OFF" =
+// it is bypassed), so callers bind it to `!bypass`. The preamp has no bypass:
+// it is the heart of the plugin and always runs.
 component SectionToggle inherits Rectangle {
     in-out property <bool> on: false;
     callback toggled(bool);
 
-    width: 46px;
+    width: 40px;
     height: 20px;
     border-radius: 10px;
     background: root.on ? #9D4EDD : #2a2a30;
@@ -753,10 +756,10 @@ export component PreVocalUI inherits Window {
                                 letter-spacing: 3px;
                             }
                             SectionToggle {
-                                on: root.comp-bypass;
+                                on: !root.comp-bypass;
                                 toggled(v) => {
-                                    root.comp-bypass = v;
-                                    root.comp-bypass-toggled(v);
+                                    root.comp-bypass = !v;
+                                    root.comp-bypass-toggled(!v);
                                 }
                             }
                         }
@@ -873,10 +876,10 @@ export component PreVocalUI inherits Window {
                                 letter-spacing: 3px;
                             }
                             SectionToggle {
-                                on: root.delay-bypass;
+                                on: !root.delay-bypass;
                                 toggled(v) => {
-                                    root.delay-bypass = v;
-                                    root.delay-bypass-toggled(v);
+                                    root.delay-bypass = !v;
+                                    root.delay-bypass-toggled(!v);
                                 }
                             }
                         }
