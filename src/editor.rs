@@ -493,18 +493,52 @@ fn install_redraw_event_filter(window: &slint::Window) {
                 let scale = window.scale_factor();
                 let logical_w = phys.width as f32 / scale;
                 let logical_h = phys.height as f32 / scale;
+                // Query the REAL client size of the child window right now.
+                // The event size comes from WM_SIZE lParam, which can lag the
+                // actual geometry while the host is mid-resize (maximize /
+                // minimize / restore send bursts of WM_SIZE). Slint caches the
+                // size from the event; if it diverges from the real client
+                // size the next frame renders at the stale (smaller) size and
+                // the UI appears pushed toward the top-left corner.
+                let (real_w, real_h) = window
+                    .with_winit_window(|ww| {
+                        let s = ww.inner_size();
+                        (s.width, s.height)
+                    })
+                    .unwrap_or((size.width, size.height));
+                if real_w != size.width || real_h != size.height {
+                    tracing::warn!(
+                        "editor: Resized event ({}x{}) != real client size ({}x{}) — geometry lag detected",
+                        size.width,
+                        size.height,
+                        real_w,
+                        real_h,
+                    );
+                }
                 tracing::info!(
-                    "editor: window event Resized({}x{}) pos=({}, {}) slint-phys=({}x{}) logical=({}x{}) scale={}",
+                    "editor: window event Resized({}x{}) pos=({}, {}) slint-phys=({}x{}) real=({}x{}) logical=({}x{}) scale={}",
                     size.width,
                     size.height,
                     win_pos.x,
                     win_pos.y,
                     phys.width,
                     phys.height,
+                    real_w,
+                    real_h,
                     logical_w,
                     logical_h,
                     scale
                 );
+                // Force a frame at the freshly-reported size. This window is a
+                // WS_CHILD resized by the host via SetWindowPos; redraws are
+                // coalesced on Windows, so after maximize/minimize the last
+                // presented frame can be one rendered at the OLD size. This
+                // redraw runs after slint caches the new size (the filter runs
+                // before slint's own resize handling), so it repaints at the
+                // correct geometry.
+                if size.width > 0 && size.height > 0 {
+                    window.request_redraw();
+                }
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 tracing::info!("editor: window event ScaleFactorChanged({})", scale_factor);
