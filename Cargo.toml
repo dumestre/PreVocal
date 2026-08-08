@@ -1,6 +1,6 @@
 [package]
 name = "PreVocal"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 authors = ["PreVocal Team <dev@prevocal.example>"]
 description = "PreVocal Vocal Bus Preamp with standalone Slint UI and nice-plug plugin targets."
