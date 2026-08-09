@@ -434,33 +434,56 @@ impl Plugin for PreVocal {
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         // Throttled diagnostics: confirms the host actually runs the DSP and
-        // shows the block size/channel count/input level (Cubase vs FL Studio).
-        if self.dsp.last_process_log.elapsed().as_secs() >= 1 {
+        // shows the block size/channel count/input+output level (Cubase vs FL
+        // Studio). Output is logged after `process_block` so a silent output
+        // with a live input points at either the DSP or the saved param state.
+        let do_log = self.dsp.last_process_log.elapsed().as_secs() >= 1;
+        let (mut in_sum_sq, mut in_peak) = (0.0f32, 0.0f32);
+        if do_log {
+            for channel in buffer.as_slice().iter() {
+                for &s in channel.iter() {
+                    in_sum_sq += s * s;
+                    in_peak = in_peak.max(s.abs());
+                }
+            }
+        }
+        self.dsp.process_block(buffer.as_slice());
+        if do_log {
             self.dsp.last_process_log = std::time::Instant::now();
             let channels = buffer.as_slice();
             let num_frames = channels.first().map_or(0, |c| c.len());
-            let mut sum_sq = 0.0f32;
-            let mut peak = 0.0f32;
+            let mut out_sum_sq = 0.0f32;
+            let mut out_peak = 0.0f32;
             for channel in channels.iter() {
                 for &s in channel.iter() {
-                    sum_sq += s * s;
-                    peak = peak.max(s.abs());
+                    out_sum_sq += s * s;
+                    out_peak = out_peak.max(s.abs());
                 }
             }
-            let rms = if num_frames == 0 || channels.is_empty() {
+            let count = (num_frames * channels.len()) as f32;
+            let rms = |sum_sq: f32| if num_frames == 0 || count == 0.0 {
                 0.0
             } else {
-                (sum_sq / (num_frames * channels.len()) as f32).sqrt()
+                (sum_sq / count).sqrt()
             };
+            let params = self.dsp.params();
             tracing::info!(
-                "PreVocal: process() channels={} frames={} in_rms={:.6} in_peak={:.6}",
+                "PreVocal: process() channels={} frames={} in_rms={:.6} in_peak={:.6} out_rms={:.6} out_peak={:.6} drive_db={:.2} trim_db={:.2} hpf={:.1} lpf={:.1} comp_bypass={} delay_bypass={} reverb_bypass={}",
                 channels.len(),
                 num_frames,
-                rms,
-                peak,
+                rms(in_sum_sq),
+                in_peak,
+                rms(out_sum_sq),
+                out_peak,
+                util::gain_to_db(params.drive.modulated_plain_value()),
+                util::gain_to_db(params.output_trim.modulated_plain_value()),
+                params.hpf.modulated_plain_value(),
+                params.lpf.modulated_plain_value(),
+                params.comp_bypass.value(),
+                params.delay_bypass.value(),
+                params.reverb_bypass.value(),
             );
         }
-        self.dsp.process_block(buffer.as_slice());
         ProcessStatus::Normal
     }
 
