@@ -346,28 +346,98 @@ impl Drop for SlintEditorInstance {
 
 /// Read the current (modulated) parameter values into the UI. The UI works in
 /// dB/Hz while the params store linear gain for drive and output trim.
+///
+/// Each property is only written when its value actually differs from what the
+/// UI already shows (with a small epsilon for the dB/gain roundtrips). This
+/// keeps the refresh loop idempotent: while a knob is being dragged the param
+/// already holds the dragged value, so the tick that fires from that change no
+/// longer re-writes *every* knob on the same event-loop pass — the suspected
+/// source of one knob visually resetting another.
 fn apply_param_values(ui: &PreVocalUI, params: &PreVocalParams) {
-    ui.set_drive(util::gain_to_db(params.drive.modulated_plain_value()));
-    ui.set_hpf(params.hpf.modulated_plain_value());
-    ui.set_lpf(params.lpf.modulated_plain_value());
-    ui.set_air(params.air.modulated_plain_value());
-    ui.set_tube_character(params.tube_character.modulated_plain_value());
-    ui.set_tube_sag(params.tube_sag.modulated_plain_value());
-    ui.set_comp_thresh(params.comp_thresh.modulated_plain_value());
-    ui.set_comp_ratio(params.comp_ratio.modulated_plain_value());
-    ui.set_comp_attack(params.comp_attack.modulated_plain_value());
-    ui.set_comp_release(params.comp_release.modulated_plain_value());
-    ui.set_comp_makeup(util::gain_to_db(params.comp_makeup.modulated_plain_value()));
-    ui.set_comp_bypass(params.comp_bypass.value());
-    ui.set_delay_time(params.delay_time.modulated_plain_value());
-    ui.set_delay_feedback(params.delay_feedback.modulated_plain_value());
-    ui.set_delay_mix(params.delay_mix.modulated_plain_value());
-    ui.set_delay_bypass(params.delay_bypass.value());
-    ui.set_reverb_size(params.reverb_size.modulated_plain_value());
-    ui.set_reverb_damping(params.reverb_damping.modulated_plain_value());
-    ui.set_reverb_mix(params.reverb_mix.modulated_plain_value());
-    ui.set_reverb_bypass(params.reverb_bypass.value());
-    ui.set_output_trim(util::gain_to_db(params.output_trim.modulated_plain_value()));
+    let drive = util::gain_to_db(params.drive.modulated_plain_value());
+    if (ui.get_drive() - drive).abs() > 1e-3 {
+        ui.set_drive(drive);
+    }
+    let hpf = params.hpf.modulated_plain_value();
+    if (ui.get_hpf() - hpf).abs() > 1e-3 {
+        ui.set_hpf(hpf);
+    }
+    let lpf = params.lpf.modulated_plain_value();
+    if (ui.get_lpf() - lpf).abs() > 1e-3 {
+        ui.set_lpf(lpf);
+    }
+    let air = params.air.modulated_plain_value();
+    if (ui.get_air() - air).abs() > 1e-3 {
+        ui.set_air(air);
+    }
+    let tube_character = params.tube_character.modulated_plain_value();
+    if (ui.get_tube_character() - tube_character).abs() > 1e-4 {
+        ui.set_tube_character(tube_character);
+    }
+    let tube_sag = params.tube_sag.modulated_plain_value();
+    if (ui.get_tube_sag() - tube_sag).abs() > 1e-4 {
+        ui.set_tube_sag(tube_sag);
+    }
+    let comp_thresh = params.comp_thresh.modulated_plain_value();
+    if (ui.get_comp_thresh() - comp_thresh).abs() > 1e-3 {
+        ui.set_comp_thresh(comp_thresh);
+    }
+    let comp_ratio = params.comp_ratio.modulated_plain_value();
+    if (ui.get_comp_ratio() - comp_ratio).abs() > 1e-3 {
+        ui.set_comp_ratio(comp_ratio);
+    }
+    let comp_attack = params.comp_attack.modulated_plain_value();
+    if (ui.get_comp_attack() - comp_attack).abs() > 1e-3 {
+        ui.set_comp_attack(comp_attack);
+    }
+    let comp_release = params.comp_release.modulated_plain_value();
+    if (ui.get_comp_release() - comp_release).abs() > 1e-3 {
+        ui.set_comp_release(comp_release);
+    }
+    let comp_makeup = util::gain_to_db(params.comp_makeup.modulated_plain_value());
+    if (ui.get_comp_makeup() - comp_makeup).abs() > 1e-3 {
+        ui.set_comp_makeup(comp_makeup);
+    }
+    let comp_bypass = params.comp_bypass.value();
+    if ui.get_comp_bypass() != comp_bypass {
+        ui.set_comp_bypass(comp_bypass);
+    }
+    let delay_time = params.delay_time.modulated_plain_value();
+    if (ui.get_delay_time() - delay_time).abs() > 1e-3 {
+        ui.set_delay_time(delay_time);
+    }
+    let delay_feedback = params.delay_feedback.modulated_plain_value();
+    if (ui.get_delay_feedback() - delay_feedback).abs() > 1e-3 {
+        ui.set_delay_feedback(delay_feedback);
+    }
+    let delay_mix = params.delay_mix.modulated_plain_value();
+    if (ui.get_delay_mix() - delay_mix).abs() > 1e-3 {
+        ui.set_delay_mix(delay_mix);
+    }
+    let delay_bypass = params.delay_bypass.value();
+    if ui.get_delay_bypass() != delay_bypass {
+        ui.set_delay_bypass(delay_bypass);
+    }
+    let reverb_size = params.reverb_size.modulated_plain_value();
+    if (ui.get_reverb_size() - reverb_size).abs() > 1e-4 {
+        ui.set_reverb_size(reverb_size);
+    }
+    let reverb_damping = params.reverb_damping.modulated_plain_value();
+    if (ui.get_reverb_damping() - reverb_damping).abs() > 1e-4 {
+        ui.set_reverb_damping(reverb_damping);
+    }
+    let reverb_mix = params.reverb_mix.modulated_plain_value();
+    if (ui.get_reverb_mix() - reverb_mix).abs() > 1e-3 {
+        ui.set_reverb_mix(reverb_mix);
+    }
+    let reverb_bypass = params.reverb_bypass.value();
+    if ui.get_reverb_bypass() != reverb_bypass {
+        ui.set_reverb_bypass(reverb_bypass);
+    }
+    let output_trim = util::gain_to_db(params.output_trim.modulated_plain_value());
+    if (ui.get_output_trim() - output_trim).abs() > 1e-3 {
+        ui.set_output_trim(output_trim);
+    }
 }
 
 /// Schedule `update` on the UI thread if an editor window is currently open.

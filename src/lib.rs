@@ -417,6 +417,13 @@ impl Plugin for PreVocal {
         self.dsp.set_sample_rate(buffer_config.sample_rate);
         self.dsp
             .resize(audio_io_layout.main_input_channels.map_or(2, |c| c.get() as usize));
+        tracing::info!(
+            "PreVocal: initialize() sample_rate={} buffer_size={} channels_in={:?} channels_out={:?}",
+            buffer_config.sample_rate,
+            buffer_config.max_buffer_size,
+            audio_io_layout.main_input_channels.map(|c| c.get()),
+            audio_io_layout.main_output_channels.map(|c| c.get()),
+        );
         true
     }
 
@@ -426,11 +433,40 @@ impl Plugin for PreVocal {
         _aux: &mut AuxiliaryBuffers,
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
+        // Throttled diagnostics: confirms the host actually runs the DSP and
+        // shows the block size/channel count/input level (Cubase vs FL Studio).
+        if self.dsp.last_process_log.elapsed().as_secs() >= 1 {
+            self.dsp.last_process_log = std::time::Instant::now();
+            let channels = buffer.as_slice();
+            let num_frames = channels.first().map_or(0, |c| c.len());
+            let mut sum_sq = 0.0f32;
+            let mut peak = 0.0f32;
+            for channel in channels.iter() {
+                for &s in channel.iter() {
+                    sum_sq += s * s;
+                    peak = peak.max(s.abs());
+                }
+            }
+            let rms = if num_frames == 0 || channels.is_empty() {
+                0.0
+            } else {
+                (sum_sq / (num_frames * channels.len()) as f32).sqrt()
+            };
+            tracing::info!(
+                "PreVocal: process() channels={} frames={} in_rms={:.6} in_peak={:.6}",
+                channels.len(),
+                num_frames,
+                rms,
+                peak,
+            );
+        }
         self.dsp.process_block(buffer.as_slice());
         ProcessStatus::Normal
     }
 
-    fn deactivate(&mut self) {}
+    fn deactivate(&mut self) {
+        tracing::info!("PreVocal: deactivate()");
+    }
 
     fn setup_logger() -> Option<bool> {
         Some(
@@ -747,6 +783,8 @@ pub struct PreVocalDsp {
     reverb: ReverbState,
     /// Realtime IN/OUT meter levels, shared with the UI (editor / standalone).
     meters: Arc<Mutex<MeterState>>,
+    /// Last time we logged audio-path diagnostics (throttled to ~1 Hz).
+    last_process_log: std::time::Instant,
 }
 
 /// One set of smoothed parameter values shared by a whole block of audio.
@@ -784,6 +822,7 @@ impl PreVocalDsp {
             delay: DelayState::default(),
             reverb: ReverbState::default(),
             meters: Arc::new(Mutex::new(MeterState::default())),
+            last_process_log: std::time::Instant::now(),
         }
     }
 

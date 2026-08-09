@@ -46,7 +46,9 @@ impl DelayCoefs {
             delay_l_samples,
             delay_r_samples: delay_r_samples.clamp(1, max_len),
             feedback: (feedback_pct / 100.0).clamp(0.0, 0.9),
-            mix: (mix_pct / 100.0).clamp(0.0, 1.0),
+            // Square-root mix curve (same reasoning as the reverb): the echo
+            // stays audible at low mix values and grows gradually to 100%.
+            mix: (mix_pct / 100.0).clamp(0.0, 1.0).sqrt(),
         }
     }
 }

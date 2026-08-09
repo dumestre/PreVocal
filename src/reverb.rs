@@ -91,11 +91,13 @@ impl ReverbCoefs {
         // damping -> one-pole coefficient 0.20..0.60.
         let comb_feedback = size * 0.28 + 0.70;
         let damp1 = damping * 0.40 + 0.20;
+        // Square-root mix curve: low mix values stay clearly audible and the
+        // sweep feels gradual from 0% instead of "nothing until ~100%".
         Self {
             comb_feedback,
             damp1,
             damp2: 1.0 - damp1,
-            mix: (mix_pct / 100.0).clamp(0.0, 1.0),
+            mix: (mix_pct / 100.0).clamp(0.0, 1.0).sqrt(),
         }
     }
 }

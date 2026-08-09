@@ -161,7 +161,14 @@ component KnobCol inherits VerticalLayout {
         value <=> root.value;
         changed(v) => { root.changed(v); }
     }
-    Text { text: root.display; font-size: 13px; color: #C77DFF; }
+    Text {
+        text: root.display;
+        font-size: 13px;
+        color: #C77DFF;
+        width: 64px;
+        horizontal-alignment: TextHorizontalAlignment.center;
+        overflow: TextOverflow.clip;
+    }
 }
 
 // Label + fader + value readout stacked column.
@@ -185,7 +192,14 @@ component FaderCol inherits VerticalLayout {
         value <=> root.value;
         changed(v) => { root.changed(v); }
     }
-    Text { text: root.display; font-size: 13px; color: #C77DFF; }
+    Text {
+        text: root.display;
+        font-size: 13px;
+        color: #C77DFF;
+        width: 64px;
+        horizontal-alignment: TextHorizontalAlignment.center;
+        overflow: TextOverflow.clip;
+    }
 }
 
 // Section header strip: title + optional on/off toggle.
@@ -798,7 +812,7 @@ export component PreVocalUI inherits Window {
                                         minimum: -12.0;
                                         maximum: 12.0;
                                         value <=> root.output-trim;
-                                        display: root.output-trim + " dB";
+                                        display: root.formatDb(root.output-trim);
                                         changed(v) => { root.output-trim-changed(v); }
                                     }
                                 }
